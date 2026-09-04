@@ -1,9 +1,9 @@
 # EDpj Implementation Specification
 
-**Version:** 0.3  
+**Version:** 0.4  
 **Status:** Implementation Baseline  
-**Date:** 2026-09-04  
-**Target Specification:** `SPECIFICATION_V0.5.md`
+**Date:** 2026-09-05  
+**Target Specification:** `SPECIFICATION_V0.6.md`
 
 ## 1. Purpose
 
@@ -207,9 +207,9 @@ FSDJump          → SupercruiseExit
 
 同一システム内の再突入は `SupercruiseEntry`、ジャンプ到着後は `FSDJump` を開始点とする。
 
-距離は同一Journalおよび静的body/station情報から可能な範囲で復元する。
+`duration_seconds`（開始 → `SupercruiseExit`）は、その後の経過に関わらず有効な所要時間サンプルである。**Phase 0-Cの所要時間較正（Go/No-Go判定の正本）はこの母集団のみで成立する。**
 
-距離モデル用SCサンプルは、終了イベントの後に次の条件を満たすイベント列を持つものだけ採用する。
+`reached_known_target` は、終了イベントの後に次の条件を満たすイベント列を持つかを記録する分類フラグである。
 
 ```text
 SupercruiseExit
@@ -220,9 +220,11 @@ SupercruiseExit
 
 **固定120秒フィルタを使用しない。** `SupercruiseExit → Docked` の長さはドッキング時間やstation typeと相関し得るため、時間窓による欠損を作らない。
 
-`Docked` または `ApproachBody` に到達する前に別の `FSDJump` / `SupercruiseEntry` が発生した場合、そのSC区間は距離モデル用として不採用とする。
+`Docked` または `ApproachBody` に到達する前に別の `FSDJump` / `SupercruiseEntry` が発生した場合、`reached_known_target=false` とする。これは「既知の目的地で終わったサンプルか」を示すのみであり、距離の正しさを保証するものでも距離モデルの採否判定でもない。
 
 SCの終了時刻は `SupercruiseExit`、dock区間は別途 `Docked` 等を使って抽出し、区間を二重計上しない。
+
+**`Docked.DistFromStarLS`（`arrival_dist_from_star_ls`として保持）は、その目的地が恒星から静的に何LS離れているかを示す値であり、SC移動距離ではない。** SC開始地点の位置がJournalから分からない以上、Journal単独で「SC移動距離 → 所要時間」の較正モデルを構築することはできない。Spanshのような静的ダンプもbody位置を「恒星からの距離」スカラーでしか持たないことが多く、系内2点間の実移動距離の復元には不十分であり、Phase 1の静的インポートでもこの制約は解消しない。真の意味でのSC距離モデルは将来の別トラックとし、現Phaseでは実装・較正しない。`arrival_dist_from_star_ls`の扱いは §6.3 で定める。
 
 Phase 0でSpansh body/station importは必須にしない。
 
@@ -237,6 +239,13 @@ Phase 0でSpansh body/station importは必須にしない。
 - 実測蓄積後に再較正
 
 ## 6. Phase 0-C — Calibration
+
+Calibrationは2トラックに分離する。
+
+1. **SC所要時間較正（主・Journal単独で成立）**: `timing_samples.duration_seconds` が対象。Go/No-Go判定はこちらを正本とし、目標 `>= 50 samples` とする（他セグメント種別は引き続き§6.4等の約20 samplesを目安とする）。
+2. **arrival_dist_from_star_ls bucket分析（副・探索的）**: `arrival_dist_from_star_ls` を「SC移動距離」ではなく参考特徴量として扱う探索的分析。単独のGo/No-Go基準を設けず、サンプル不足時は省略してよい（§6.3参照）。
+
+以下 6.1・6.2 はトラック1（SC所要時間較正）を主対象とする。6.3 はトラック2の扱いを定める。6.4 は別セグメント（mining_cycle）の較正。
 
 ### 6.1 Fit/eval
 
@@ -271,7 +280,9 @@ Go/No-Go はeval側の誤差のみで判定する。
 
 **評価区分が0件の場合はPASSにしてはならず `INSUFFICIENT` とする。** bucket統合はfit側の件数だけで決めず、統合後にfit/eval双方の件数を検証する。evalが0件となる区分は `INSUFFICIENT` として扱い、全体PASSへすり替えない。
 
-### 6.3 SC buckets
+### 6.3 arrival_dist_from_star_ls bucket分析（探索的、Go/No-Go対象外）
+
+`arrival_dist_from_star_ls` はSC移動距離ではなく、目的地の恒星からの静的距離である（§5.3参照）。ただし経験的には遠い目的地ほどSC所要時間が長くなる傾向があるため、**探索的な参考特徴量**として以下のbucketで `duration_seconds` との相関・傾向を確認してよい。これは「SC距離 → 時間」の較正モデルではなく、単なる探索的分析である。
 
 初期:
 
@@ -283,7 +294,9 @@ Go/No-Go はeval側の誤差のみで判定する。
 50,000+ ls
 ```
 
-20 samples未満の区分は隣接区分との統合候補とする。統合判断後、fit/eval双方にサンプルが存在することを確認する。evalが0件ならその区分の判定は `INSUFFICIENT`。統合結果と件数はmodel metadataへ保存する。
+対象は `arrival_dist_from_star_ls` が取得できたサンプル（`Docked` 終端かつ `reached_known_target=true`）のみに限る。`ApproachBody` 終端サンプルおよび `reached_known_target=false` のサンプルはこの分析には含めない（所要時間較正 §6.1 には引き続き含める）。
+
+20 samples未満の区分は隣接区分との統合候補とする。統合判断後、fit/eval双方にサンプルが存在することを確認する。evalが0件ならその区分の判定は `INSUFFICIENT`。統合結果と件数はmodel metadataへ保存する。**ただしこの分析全体はPhase 0-CのGo/No-Go判定に使用しない。** サンプルが不足する場合は分析自体を省略してよい。「距離データが足りないためPhase 0-Cに進めない」という依存関係は成立しない。
 
 ### 6.4 Mining cycle calibration
 
@@ -818,7 +831,7 @@ Exit:
 
 - jump timing
 - SC timing with `FSDJump` and `SupercruiseEntry` starts
-- event-sequence-based SC distance sample filtering
+- event-sequence-based `reached_known_target` classification (not a distance measurement — see §5.3)
 - dock/undock
 - mining cycle
 - bio timing
@@ -827,20 +840,37 @@ Exit:
 Exit:
 
 - FSDJump-origin SC sample is extracted
-- no fixed 120-second SC distance filter
-- intervening FSDJump/SupercruiseEntry invalidates the preceding SC distance sample
+- no fixed 120-second window for the `reached_known_target` classification
+- intervening FSDJump/SupercruiseEntry sets the preceding sample's `reached_known_target=false`
 - timing samples are session-safe
 
 ### Phase 0-C
 
+Go/No-Go is split into two tracks (see §6):
+
+```text
+SC duration calibration (primary — this is the Go/No-Go record of truth)
+  - duration_seconds-valid SC intervals
+  - target: >= 50 samples
+  - chronological 70/30 fit/eval
+  - eval sample count must be checked
+  - eval=0 -> INSUFFICIENT
+
+arrival_dist_from_star_ls bucket analysis (secondary — exploratory)
+  - a reference-feature correlation check, not a distance-to-duration model
+  - not used for the Phase 0-C Go/No-Go decision
+  - may be skipped entirely if samples are insufficient
+```
+
+Other segment types (jump/dock/undock/descent/ascent/mining_cycle/bio_sample) keep the ~20 samples guidance below.
+
 - robust calibration
 - 30h history target
-- approximately 20 timing samples per required calibration where applicable
 - chronological 70/30 fit/eval
-- bucket merge
+- bucket merge (if the arrival_dist_from_star_ls analysis is performed)
 - insufficient-data status
 
-Exit:
+Exit (applies to SC duration calibration):
 
 ```text
 median absolute error <= 20%
@@ -1060,7 +1090,7 @@ class BioTarget:
     body_name: str            # 表示用 例 "HIP 20277 A 5 a"
     system_name: str          # コピー用 例 "HIP 20277"
     body_suffix: str          # 現地探索用 例 "A 5 a"
-    distance_ls: float
+    arrival_dist_from_star_ls: float   # 恒星からの静的距離。SC移動距離ではない（§5.3参照）
     gravity: float
     colony_spacing_m: int
     discovery: DiscoveryState
@@ -1072,7 +1102,7 @@ class MiningTarget:
     system_name: str          # コピー用
     parent_body_name: str | None   # 惑星ポートの場合の親天体
     station_type: str
-    distance_ls: float
+    arrival_dist_from_star_ls: float   # 恒星からの静的距離。SC移動距離ではない（§5.3参照）
     max_landing_pad: str
     demand: int
     cargo_demand_ratio: float

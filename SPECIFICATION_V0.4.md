@@ -1,9 +1,9 @@
 # EDpj Specification
 
-**Version:** 0.5  
+**Version:** 0.6  
 **Status:** Canonical Implementation Baseline  
-**Date:** 2026-09-04  
-**Previous:** `SPECIFICATION_V0.4.md`
+**Date:** 2026-09-05  
+**Previous:** 0.5 — §14.1/§14.3: `Docked.DistFromStarLS` is no longer treated as a supercruise-distance calibration input (see §14.1)
 
 ## 1. 目的
 
@@ -516,7 +516,11 @@ SupercruiseEntry
 FSDJump
 ```
 
-終了は `SupercruiseExit`。距離モデル用として採用するには、終了後に別の `FSDJump` / `SupercruiseEntry` を挟まず `Docked` または `ApproachBody` に到達するイベント列を要求する。固定120秒窓は使用しない。
+終了は `SupercruiseExit`。`duration_seconds`（開始 → `SupercruiseExit`）は、その後の経過に関わらず有効な所要時間サンプルである。**Phase 0-Cの所要時間較正（Go/No-Go判定の正本）はこの母集団のみで成立する。**
+
+終了後、別の `FSDJump` / `SupercruiseEntry` を挟まず `Docked` または `ApproachBody` に到達したかを `reached_known_target` として記録する（固定120秒窓は使用しない）。これは「既知の目的地で終わったサンプルか」を示す分類フラグであり、距離の正しさを保証するものでも、距離モデルの採否判定でもない。
+
+**`Docked.DistFromStarLS`（`arrival_dist_from_star_ls`として保持）は、その目的地が恒星から静的に何LS離れているかを示す値であり、SC移動距離ではない。** SC開始地点の位置がJournalから分からない以上、Journal単独で「SC移動距離 → 所要時間」の較正モデルを構築することはできない。Spansh等の一般的な静的ダンプもbody位置を「恒星からの距離」スカラーでしか持たないことが多く、系内2点間の実移動距離の復元には不十分であり、Phase 1の静的インポートでもこの制約は解消しない。真の意味でのSC距離モデルは将来の別トラックとし、現Phaseでは実装・較正しない。`arrival_dist_from_star_ls` の扱いは §14.3 で定める。
 
 ### 14.2 Fit/eval
 
@@ -524,9 +528,9 @@ FSDJump
 
 evalはモデル選択・bucket選択に使用しない。
 
-### 14.3 Sparse bucket
+### 14.3 arrival_dist_from_star_ls bucket分析（探索的、Go/No-Go対象外）
 
-SC初期bucket:
+`arrival_dist_from_star_ls` はSC移動距離ではなく、目的地の恒星からの静的距離である（§14.1参照）。ただし経験的には遠い目的地ほどSC所要時間が長くなる傾向があるため、**探索的な参考特徴量**として以下のbucketで `duration_seconds` との相関・傾向を確認してよい。これは「SC距離 → 時間」の較正モデルではなく、単なる探索的分析である。
 
 ```text
 0–100 ls
@@ -536,9 +540,11 @@ SC初期bucket:
 50,000+ ls
 ```
 
-20 samples未満の区分は隣接区分と統合する。ただし統合後のeval件数も必ず検証する。必要なeval区分が0件の場合は `INSUFFICIENT` とし、誤差NaNを無視してPASSにしてはならない。
+対象は `arrival_dist_from_star_ls` が取得できたサンプル（`Docked` 終端かつ `reached_known_target=true`）のみに限る。`ApproachBody` 終端サンプルおよび `reached_known_target=false` のサンプルはこの分析には含めない（所要時間較正 §14.1 には引き続き含める）。
 
-保存:
+20 samples未満の区分は隣接区分と統合する。統合後のeval件数も検証し、0件の区分は `INSUFFICIENT` とする。**ただしこの分析全体はPhase 0-CのGo/No-Go判定に使用しない。** サンプルが不足する場合は分析自体を省略してよい。「距離データが足りないためPhase 0-Cに進めない」という依存関係は成立しない。
+
+保存（この探索的分析を実施した場合）:
 
 - median_absolute_error
 - median_signed_error
@@ -621,7 +627,7 @@ Exit:
 
 - jump timing
 - SC timing (`FSDJump` + `SupercruiseEntry` start)
-- event-sequence-based SC distance filtering
+- event-sequence-based `reached_known_target` classification（距離測定ではない。§14.1参照）
 - dock/undock
 - bio timing
 - mining cycle
@@ -631,18 +637,35 @@ Exit:
 
 - FSDJump-origin SC sampleが抽出できる
 - 固定120秒フィルタを使用しない
-- intervening FSDJump/SupercruiseEntryがあればSC distance sampleを不採用
+- intervening FSDJump/SupercruiseEntryがあればそのサンプルは `reached_known_target=false`
 
 ### Phase 0-C — Calibration
 
+Go/No-Go判定は2トラックに分離する（§14.1/§14.3参照）。
+
+```text
+SC duration calibration（主・Go/No-Goの正本）
+  └─ duration_seconds が有効なSC interval
+  └─ 目標: >= 50 samples
+  └─ chronological 70/30 fit/eval
+  └─ eval件数を必ず確認
+  └─ eval=0 → INSUFFICIENT
+
+arrival_dist_from_star_ls bucket分析（副・探索的）
+  └─ 参考特徴量としての相関確認のみ
+  └─ calibrationのGo/No-Goには使用しない
+  └─ サンプル不足なら分析自体を省略可能
+```
+
+他セグメント（jump/dock/undock/descent/ascent/mining_cycle/bio_sample）は引き続き約20 samplesを目安とする。
+
 - robust calibration
 - 30h history target
-- 約20 timing samples target
 - chronological 70/30 fit/eval
-- sparse bucket merge
+- sparse bucket merge（arrival_dist_from_star_ls分析を実施する場合）
 - INSUFFICIENT status
 
-Exit:
+Exit（SC duration calibrationに適用）:
 
 ```text
 median absolute error <= 20%
@@ -826,7 +849,7 @@ class BioTarget:
     body_name: str            # 表示用 例 "HIP 20277 A 5 a"
     system_name: str          # コピー用 例 "HIP 20277"
     body_suffix: str          # 現地探索用 例 "A 5 a"
-    distance_ls: float
+    arrival_dist_from_star_ls: float   # 恒星からの静的距離。SC移動距離ではない（§14.1参照）
     gravity: float
     colony_spacing_m: int
     discovery: DiscoveryState
@@ -838,7 +861,7 @@ class MiningTarget:
     system_name: str          # コピー用
     parent_body_name: str | None   # 惑星ポートの場合の親天体
     station_type: str
-    distance_ls: float
+    arrival_dist_from_star_ls: float   # 恒星からの静的距離。SC移動距離ではない（§14.1参照）
     max_landing_pad: str
     demand: int
     cargo_demand_ratio: float
