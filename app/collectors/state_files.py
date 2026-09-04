@@ -44,3 +44,11 @@ def read_cargo(journal_dir: str | Path) -> StateFileResult:
 
 def read_market(journal_dir: str | Path) -> StateFileResult:
     return _read_json_file(Path(journal_dir) / "Market.json")
+
+
+def read_navroute(journal_dir: str | Path) -> StateFileResult:
+    """NavRoute.json holds the plotted route's leg list; like Market.json
+    it's overwritten on the next plot, so route_plot extraction (Phase 0-B)
+    correlates it to the most recent `NavRoute` journal event by timestamp,
+    the same pattern Phase 0-A uses for Docked/Market.json."""
+    return _read_json_file(Path(journal_dir) / "NavRoute.json")

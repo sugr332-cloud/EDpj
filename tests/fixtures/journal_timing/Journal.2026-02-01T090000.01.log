@@ -1,0 +1,20 @@
+{"timestamp":"2026-02-01T09:00:00Z","event":"LoadGame","Commander":"TestCMDR","ShipID":42,"Ship":"CobraMkIII","GameMode":"Solo","Credits":1000000}
+{"timestamp":"2026-02-01T09:00:10Z","event":"StartJump","JumpType":"Hyperspace","StarSystem":"Deciat"}
+{"timestamp":"2026-02-01T09:00:35Z","event":"FSDJump","StarSystem":"Deciat","SystemAddress":1,"Body":"Deciat A","BodyID":1}
+{"timestamp":"2026-02-01T09:05:35Z","event":"SupercruiseExit","StarSystem":"Deciat","Body":"Deciat A","BodyID":1}
+{"timestamp":"2026-02-01T09:05:40Z","event":"DockingGranted","StationName":"Farseer Inc","MarketID":999}
+{"timestamp":"2026-02-01T09:05:52Z","event":"Docked","StationName":"Farseer Inc","StarSystem":"Deciat","SystemAddress":1,"MarketID":999,"DistFromStarLS":450.0}
+{"timestamp":"2026-02-01T09:10:00Z","event":"Undocked","StationName":"Farseer Inc","MarketID":999}
+{"timestamp":"2026-02-01T09:10:15Z","event":"SupercruiseEntry","StarSystem":"Deciat"}
+{"timestamp":"2026-02-01T09:11:30Z","event":"SupercruiseExit","StarSystem":"Deciat","Body":"Deciat 2","BodyID":5}
+{"timestamp":"2026-02-01T09:11:40Z","event":"ApproachBody","StarSystem":"Deciat","Body":"Deciat 2","BodyID":5}
+{"timestamp":"2026-02-01T09:14:40Z","event":"Touchdown","StarSystem":"Deciat","Body":"Deciat 2","BodyID":5}
+{"timestamp":"2026-02-01T09:15:00Z","event":"ScanOrganic","Genus":"$Codex_Ent_Fumerolas_Genus_Name;","Species":"$Codex_Ent_Fumerolas_01_Name;","ScanType":"Log"}
+{"timestamp":"2026-02-01T09:16:35Z","event":"ScanOrganic","Genus":"$Codex_Ent_Fumerolas_Genus_Name;","Species":"$Codex_Ent_Fumerolas_01_Name;","ScanType":"Sample"}
+{"timestamp":"2026-02-01T09:20:00Z","event":"Liftoff","StarSystem":"Deciat","Body":"Deciat 2","BodyID":5}
+{"timestamp":"2026-02-01T09:20:40Z","event":"LeaveBody","StarSystem":"Deciat","BodyID":5}
+{"timestamp":"2026-02-01T09:23:20Z","event":"MiningRefined","Type":"$platinum_name;"}
+{"timestamp":"2026-02-01T09:25:20Z","event":"MiningRefined","Type":"$platinum_name;"}
+{"timestamp":"2026-02-01T09:26:40Z","event":"NavRoute"}
+{"timestamp":"2026-02-01T09:27:30Z","event":"FSDJump","StarSystem":"Wolf 359","SystemAddress":2,"Body":"Wolf 359 A","BodyID":1}
+{"timestamp":"2026-02-01T09:28:20Z","event":"FSDJump","StarSystem":"Sol","SystemAddress":3,"Body":"Sol","BodyID":1}

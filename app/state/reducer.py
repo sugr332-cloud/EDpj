@@ -12,32 +12,18 @@ Status.json doesn't fully capture on its own (e.g. current system name).
 """
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass, field
 from typing import Iterable
 
 from app.collectors.state_files import StateFileResult
 from app.journal import events as ev
+from app.journal.types import TimestampedEvent as JournalEventLike
 
 # Status.json Flags bitfield (subset relevant to Phase 0-A).
 FLAG_DOCKED = 1 << 0
 FLAG_LANDED = 1 << 1
 # Status.json Flags2 bitfield (Odyssey on-foot state).
 FLAG2_ON_FOOT = 1 << 0
-
-
-@dataclass
-class JournalEventLike:
-    """Minimal shape reduce_events() needs — satisfied by both the ORM
-    JournalEvent model and app.journal.parser.ParsedLine, so the reducer
-    doesn't care whether state is being rebuilt from DB rows or from a
-    fresh backfill pass."""
-
-    file_name: str
-    line_number: int
-    timestamp: dt.datetime
-    event_type: str
-    payload: dict
 
 
 @dataclass

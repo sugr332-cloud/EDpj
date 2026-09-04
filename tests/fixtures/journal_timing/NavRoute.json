@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-02-01T09:26:40Z",
+  "event": "NavRoute",
+  "Route": [
+    {"StarSystem": "Deciat", "SystemAddress": 1},
+    {"StarSystem": "Wolf 359", "SystemAddress": 2},
+    {"StarSystem": "Sol", "SystemAddress": 3}
+  ]
+}

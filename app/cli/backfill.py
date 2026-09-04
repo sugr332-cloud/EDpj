@@ -11,24 +11,27 @@ invalid lines, first event, last event.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.collectors.state_files import read_cargo, read_market, read_status
+from app.collectors.state_files import read_cargo, read_market, read_navroute, read_status
 from app.db.models.journal import JournalEvent
 from app.db.models.market import MarketSnapshot
+from app.db.models.timing import RoutePlotSample, TimingSample
 from app.db.session import SessionLocal, init_db
 from app.journal import events as ev
 from app.journal.extractor import docked_market_matches, extract_market_snapshot
-from app.journal.parser import InvalidLine, ParsedLine, iter_journal_lines
+from app.journal.parser import InvalidLine, ParsedLine, iter_journal_lines, parse_journal_timestamp
+from app.journal.timing import extract_all_timing_samples, extract_route_plot_samples
 from app.state.persist import apply_reduced_state
 from app.state.reducer import build_reduced_state
 
 BATCH_SIZE = 1000
+NAVROUTE_MATCH_TOLERANCE = dt.timedelta(minutes=10)
 
 journal_app = typer.Typer(help="Journal ingestion commands")
 
@@ -42,6 +45,13 @@ class BackfillSummary:
     invalid_lines: int
     first_event: dt.datetime | None
     last_event: dt.datetime | None
+    # Phase 0-B: cumulative totals in the DB after this run, keyed by
+    # segment_type — e.g. {"supercruise": 42, "jump": 30, ...}. Lets the
+    # CLI report the SC-interval sample count the Phase 0-B/0-C Go/No-Go
+    # decision needs, without a separate `edpj timing` command.
+    timing_sample_totals: dict[str, int] = field(default_factory=dict)
+    supercruise_distance_eligible_total: int = 0
+    route_plot_samples_total: int = 0
 
 
 def _upsert_ignore(session: Session, model, rows: list[dict], index_elements: list[str]) -> None:
@@ -156,6 +166,104 @@ def _capture_docked_market(directory: Path, session: Session) -> None:
     session.commit()
 
 
+def _match_current_navroute(directory: Path, session: Session) -> dict | None:
+    """Same correlation approach as _capture_docked_market: only trust the
+    current NavRoute.json if it plausibly corresponds to the most recent
+    `NavRoute` journal event (close timestamp), since it's overwritten on
+    every re-plot."""
+    navroute_result = read_navroute(directory)
+    if navroute_result.status != "ok" or navroute_result.data is None:
+        return None
+
+    last_navroute_event = (
+        session.query(JournalEvent)
+        .filter(JournalEvent.event_type == ev.NAV_ROUTE)
+        .order_by(JournalEvent.timestamp.desc())
+        .first()
+    )
+    if last_navroute_event is None:
+        return None
+
+    try:
+        navroute_ts = parse_journal_timestamp(navroute_result.data["timestamp"])
+        # Re-parse from the raw event payload rather than reading the ORM
+        # `timestamp` column directly: SQLite's DateTime(timezone=True)
+        # doesn't round-trip tzinfo, so comparing an aware datetime against
+        # a naive one read back from SQLite raises. The payload's own
+        # "timestamp" string is always aware once parsed, on every dialect.
+        event_ts = parse_journal_timestamp(last_navroute_event.payload["timestamp"])
+    except (KeyError, ValueError):
+        return None
+
+    if abs(navroute_ts - event_ts) > NAVROUTE_MATCH_TOLERANCE:
+        return None
+    return navroute_result.data
+
+
+def _extract_timing(directory: Path, session: Session) -> None:
+    events = (
+        session.query(JournalEvent)
+        .filter(JournalEvent.event_type.in_(ev.TIMING_RELEVANT_EVENTS))
+        .order_by(JournalEvent.timestamp, JournalEvent.file_name, JournalEvent.line_number)
+        .all()
+    )
+
+    timing_rows = [
+        {
+            "segment_type": s.segment_type,
+            "start_file_name": s.start_file_name,
+            "start_line_number": s.start_line_number,
+            "end_file_name": s.end_file_name,
+            "end_line_number": s.end_line_number,
+            "start_time": s.start_time,
+            "end_time": s.end_time,
+            "duration_seconds": s.duration_seconds,
+            "distance_ls": s.distance_ls,
+            "valid_for_distance_model": s.valid_for_distance_model,
+            "extra": s.extra,
+        }
+        for s in extract_all_timing_samples(events)
+    ]
+    _upsert_ignore(
+        session,
+        TimingSample,
+        timing_rows,
+        ["segment_type", "start_file_name", "start_line_number", "end_file_name", "end_line_number"],
+    )
+
+    navroute_data = _match_current_navroute(directory, session)
+    route_rows = [
+        {
+            "navroute_file_name": r.navroute_file_name,
+            "navroute_line_number": r.navroute_line_number,
+            "systems": r.systems,
+            "completed_at": r.completed_at,
+            "leg_arrivals": r.leg_arrivals,
+        }
+        for r in extract_route_plot_samples(events, navroute_data)
+    ]
+    _upsert_ignore(session, RoutePlotSample, route_rows, ["navroute_file_name", "navroute_line_number"])
+
+    session.commit()
+
+
+def _timing_totals(session: Session) -> tuple[dict[str, int], int, int]:
+    counts = (
+        session.query(TimingSample.segment_type, func.count(TimingSample.id))
+        .group_by(TimingSample.segment_type)
+        .all()
+    )
+    totals = {segment_type: count for segment_type, count in counts}
+    sc_eligible = (
+        session.query(func.count(TimingSample.id))
+        .filter(TimingSample.segment_type == "supercruise", TimingSample.valid_for_distance_model.is_(True))
+        .scalar()
+        or 0
+    )
+    route_plot_total = session.query(func.count(RoutePlotSample.id)).scalar() or 0
+    return totals, sc_eligible, route_plot_total
+
+
 def _reduce_state(directory: Path, session: Session) -> None:
     status = read_status(directory)
     cargo = read_cargo(directory)
@@ -172,7 +280,13 @@ def _reduce_state(directory: Path, session: Session) -> None:
 def run_backfill(directory: Path, session: Session) -> BackfillSummary:
     summary = _ingest_journal_lines(directory, session)
     _capture_docked_market(directory, session)
+    _extract_timing(directory, session)
     _reduce_state(directory, session)
+
+    totals, sc_eligible, route_plot_total = _timing_totals(session)
+    summary.timing_sample_totals = totals
+    summary.supercruise_distance_eligible_total = sc_eligible
+    summary.route_plot_samples_total = route_plot_total
     return summary
 
 
@@ -194,3 +308,11 @@ def backfill_command(
     typer.echo(f"invalid lines: {summary.invalid_lines}")
     typer.echo(f"first event: {summary.first_event.isoformat() if summary.first_event else 'N/A'}")
     typer.echo(f"last event: {summary.last_event.isoformat() if summary.last_event else 'N/A'}")
+    typer.echo("timing samples (cumulative):")
+    if summary.timing_sample_totals:
+        for segment_type in sorted(summary.timing_sample_totals):
+            typer.echo(f"  {segment_type}: {summary.timing_sample_totals[segment_type]}")
+    else:
+        typer.echo("  (none)")
+    typer.echo(f"  supercruise (distance-model eligible): {summary.supercruise_distance_eligible_total}")
+    typer.echo(f"route_plot samples (cumulative): {summary.route_plot_samples_total}")
