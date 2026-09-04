@@ -1,9 +1,9 @@
 # EDpj Implementation Specification
 
-**Version:** 0.4  
+**Version:** 0.5  
 **Status:** Implementation Baseline  
 **Date:** 2026-09-05  
-**Target Specification:** `SPECIFICATION_V0.6.md`
+**Target Specification:** `SPECIFICATION_V0.7.md`
 
 ## 1. Purpose
 
@@ -207,7 +207,7 @@ FSDJump          → SupercruiseExit
 
 同一システム内の再突入は `SupercruiseEntry`、ジャンプ到着後は `FSDJump` を開始点とする。
 
-`duration_seconds`（開始 → `SupercruiseExit`）は、その後の経過に関わらず有効な所要時間サンプルである。**Phase 0-Cの所要時間較正（Go/No-Go判定の正本）はこの母集団のみで成立する。**
+`duration_seconds`（開始 → `SupercruiseExit`）はJournalから直接観測できる実測値であり、`timing_samples` に **observed telemetry** として保存する。
 
 `reached_known_target` は、終了イベントの後に次の条件を満たすイベント列を持つかを記録する分類フラグである。
 
@@ -224,7 +224,13 @@ SupercruiseExit
 
 SCの終了時刻は `SupercruiseExit`、dock区間は別途 `Docked` 等を使って抽出し、区間を二重計上しない。
 
-**`Docked.DistFromStarLS`（`arrival_dist_from_star_ls`として保持）は、その目的地が恒星から静的に何LS離れているかを示す値であり、SC移動距離ではない。** SC開始地点の位置がJournalから分からない以上、Journal単独で「SC移動距離 → 所要時間」の較正モデルを構築することはできない。Spanshのような静的ダンプもbody位置を「恒星からの距離」スカラーでしか持たないことが多く、系内2点間の実移動距離の復元には不十分であり、Phase 1の静的インポートでもこの制約は解消しない。真の意味でのSC距離モデルは将来の別トラックとし、現Phaseでは実装・較正しない。`arrival_dist_from_star_ls`の扱いは §6.3 で定める。
+**この `duration_seconds` の集合を、新規候補のSC時間予測（Action Horizon Estimator, §6参照）には使用しない。** 理由:
+
+- SC開始地点の位置がJournalから分からないため、SC移動距離の実測値が存在しない
+- `arrival_dist_from_star_ls`（`Docked.DistFromStarLS`）は目的地の恒星からの静的距離であり、SC移動距離ではない。AHEの説明変数として使用しない（§6.3の探索的分析にのみ利用する）
+- 全SCサンプルのglobal median等の単一統計値も、候補ごとの所要時間の大きなばらつき（実データで36倍の幅）を無視することになるため採用しない
+
+**現行のJournal等のデータソースでは、候補固有のSC移動距離を取得できないため、候補固有のSC時間推定は `unavailable` とする。** 将来、実SC移動距離を取得可能なデータソースが追加された場合は、`estimated` へ拡張可能とする（§6.5）。
 
 Phase 0でSpansh body/station importは必須にしない。
 
@@ -238,16 +244,17 @@ Phase 0でSpansh body/station importは必須にしない。
 - 不足時の `detour_factor=1.15`
 - 実測蓄積後に再較正
 
-## 6. Phase 0-C — Calibration
+## 6. Phase 0-C — Action Horizon Foundation
 
-Calibrationは2トラックに分離する。
+目的は「実データでSC時間モデルを完成させる」ことではなく、**Action Horizon Estimator (AHE) のインターフェースを確立する**こと。AHEは各時間要素について `measured` / `estimated` / `unavailable` のいずれかを明示して返す。「必ず数値を返すこと」を責務としない。
 
-1. **SC所要時間較正（主・Journal単独で成立）**: `timing_samples.duration_seconds` が対象。Go/No-Go判定はこちらを正本とし、目標 `>= 50 samples` とする（他セグメント種別は引き続き§6.4等の約20 samplesを目安とする）。
-2. **arrival_dist_from_star_ls bucket分析（副・探索的）**: `arrival_dist_from_star_ls` を「SC移動距離」ではなく参考特徴量として扱う探索的分析。単独のGo/No-Go基準を設けず、サンプル不足時は省略してよい（§6.3参照）。
+現行のJournal等のデータソースでは候補固有のSC移動距離を取得できないため、supercruiseは常に `unavailable` を返す（§5.3）。将来、実SC移動距離を取得可能なデータソースが追加された場合は `estimated` へ拡張可能とする（§6.5）。jump / dock / undock / descent / ascent / mining_cycle / bio_sampleは、引き続き6.1/6.2/6.4のfit/eval較正の対象とする。
 
-以下 6.1・6.2 はトラック1（SC所要時間較正）を主対象とする。6.3 はトラック2の扱いを定める。6.4 は別セグメント（mining_cycle）の較正。
+`arrival_dist_from_star_ls` はAHEの入力ではなく、§6.3の探索的分析にのみ利用する（Go/No-Go対象外）。
 
 ### 6.1 Fit/eval
+
+対象は jump / dock / undock / descent / ascent / mining_cycle / bio_sample。**supercruiseは対象外**（§5.3参照）。
 
 時系列昇順で70/30を基本とする。
 
@@ -294,7 +301,7 @@ Go/No-Go はeval側の誤差のみで判定する。
 50,000+ ls
 ```
 
-対象は `arrival_dist_from_star_ls` が取得できたサンプル（`Docked` 終端かつ `reached_known_target=true`）のみに限る。`ApproachBody` 終端サンプルおよび `reached_known_target=false` のサンプルはこの分析には含めない（所要時間較正 §6.1 には引き続き含める）。
+対象は `arrival_dist_from_star_ls` が取得できたサンプル（`Docked` 終端かつ `reached_known_target=true`）のみに限る。`ApproachBody` 終端サンプルおよび `reached_known_target=false` のサンプルはこの分析には含めない。ただしいずれも`duration_seconds`はsupercruiseのobserved telemetry（§5.3）として引き続き保存される。
 
 20 samples未満の区分は隣接区分との統合候補とする。統合判断後、fit/eval双方にサンプルが存在することを確認する。evalが0件ならその区分の判定は `INSUFFICIENT`。統合結果と件数はmodel metadataへ保存する。**ただしこの分析全体はPhase 0-CのGo/No-Go判定に使用しない。** サンプルが不足する場合は分析自体を省略してよい。「距離データが足りないためPhase 0-Cに進めない」という依存関係は成立しない。
 
@@ -303,6 +310,23 @@ Go/No-Go はeval側の誤差のみで判定する。
 `MiningRefined` の連続イベントから採掘サイクル時間を推定する。
 
 外れ値に強い median / trimmed statistics を初期モデルとする。最低20サンプルを目安とし、不足時は confidence を下げる。
+
+### 6.5 AHEインターフェース
+
+`app/routing/time.py` の `estimate_segment(segment_type, context) -> TimeEstimate` は次を返す。
+
+```python
+class TimeEstimate:
+    segment_type: str
+    status: Literal["measured", "estimated", "unavailable"]
+    seconds: float | None       # unavailableの場合はNone
+    confidence: float | None    # unavailableの場合はNone
+    basis: str                  # 根拠の説明。例: "fit sample_count=34, median"／"no observed samples"
+```
+
+`status="unavailable"` の場合、`seconds`・`confidence` は共に `None` とする（§26「取得できないデータを推定で埋めない」に従い、値を合成しない）。
+
+supercruiseは現行データソースの制約により常に `status="unavailable"` を返す（§5.3）。将来、実SC移動距離を取得可能なデータソースが追加された場合、この判定ロジックを`estimated`（さらに実績が積み上がれば`measured`）を返すよう拡張できる設計とする。
 
 ## 7. Database
 
@@ -612,10 +636,24 @@ class ActionCandidate:
     action: str
     target: dict | None
     expected_value: float
-    action_horizon_seconds: float
-    score_per_hour: float
+    action_horizon_seconds: float | None   # horizon_complete=Falseの場合None
+    horizon_components: dict[str, TimeEstimate]   # segment_type -> TimeEstimate（§6.5）
+    horizon_complete: bool                 # 定義は下記
+    score_per_hour: float | None           # horizon_complete=Falseの場合None
     confidence: float
     reason: str
+```
+
+`horizon_complete` は「`horizon_components` に含まれる全segment_typeがunavailableでない」という意味ではない。**「当該Actionのscore計算に必要な全時間要素（=そのActionのhorizonを構成するsegment_typeすべて）が利用可能である」**と定義する。したがって、supercruiseを必要としないActionは、supercruise自体がunavailableな状況下でも`horizon_complete=true`になり得る。例:
+
+```text
+mining_sell（supercruiseを要する）
+  jump: measured, dock: estimated, supercruise: unavailable
+  → horizon_complete = false
+
+（supercruiseを要しない候補、例:同一天体内のbio_sample等）
+  descent: measured, bio_sample: estimated
+  → horizon_complete = true
 ```
 
 ### 12.3 Confidence-aware selection
@@ -657,7 +695,8 @@ if bio_enabled:
 
 valid = [
     c for c in candidates
-    if c.action_horizon_seconds > 0
+    if c.horizon_complete
+    and c.action_horizon_seconds > 0
     and c.confidence >= MIN_ACTION_CONFIDENCE
 ]
 
@@ -667,6 +706,8 @@ alternatives = valid[1:]
 ```
 
 同じ状態から実行可能な候補を比較する。特に `mining_sell` は売却後に採掘へ戻る通常復路をhorizonへ含めることで、`mining_continue` と異なる終端状態を理由に構造的に常勝しないようにする。
+
+`c.horizon_complete` によるこの除外は暫定実装である。`horizon_complete=false`（当該Actionのhorizonにsupercruiseを含み、それが`unavailable`である場合等）の候補を`valid`からどう扱うか（このまま除外する／別枠で保持し将来のモデル追加時に自動的に有効化する等）は、`ActionCandidate.confidence`の各構成要素の合成方法（min／加重平均等）と合わせてPhase 2の候補選択実装時に決定する。
 
 ## 13. API
 
@@ -844,41 +885,36 @@ Exit:
 - intervening FSDJump/SupercruiseEntry sets the preceding sample's `reached_known_target=false`
 - timing samples are session-safe
 
-### Phase 0-C
+### Phase 0-C — Action Horizon Foundation
 
-Go/No-Go is split into two tracks (see §6):
+Goal: establish the Action Horizon Estimator (AHE) interface (see §6), not complete an SC time model from real data.
 
-```text
-SC duration calibration (primary — this is the Go/No-Go record of truth)
-  - duration_seconds-valid SC intervals
-  - target: >= 50 samples
-  - chronological 70/30 fit/eval
-  - eval sample count must be checked
-  - eval=0 -> INSUFFICIENT
+- AHE returns measured / estimated / unavailable per time segment, uniformly
+- SC duration is stored as observed telemetry (Journal-derived); it is not used as candidate-specific SC time prediction input
+- current data sources (Journal alone) cannot support candidate-specific SC travel-distance estimation, so SC segments always return `status="unavailable"`; once a data source for real SC travel distance exists, this can be extended to `estimated` (§6.5)
+- arrival_dist_from_star_ls is not used as an AHE input (exploratory analysis only, §6.3)
+- fit/eval calibration (§6.1/6.2) continues to apply to jump/dock/undock/descent/ascent/mining_cycle/bio_sample, keeping the ~20 samples guidance
 
-arrival_dist_from_star_ls bucket analysis (secondary — exploratory)
-  - a reference-feature correlation check, not a distance-to-duration model
-  - not used for the Phase 0-C Go/No-Go decision
-  - may be skipped entirely if samples are insufficient
-```
-
-Other segment types (jump/dock/undock/descent/ascent/mining_cycle/bio_sample) keep the ~20 samples guidance below.
-
-- robust calibration
+- robust calibration (jump/dock/undock/descent/ascent/mining_cycle/bio_sample; supercruise excluded)
 - 30h history target
 - chronological 70/30 fit/eval
-- bucket merge (if the arrival_dist_from_star_ls analysis is performed)
+- bucket merge (if the arrival_dist_from_star_ls exploratory analysis is performed)
 - insufficient-data status
 
-Exit (applies to SC duration calibration):
+Exit:
 
 ```text
+measured/estimated/unavailable fixtures pass for the applicable segment types
+supercruise is verified to always return unavailable
+(the following applies to the other segments' calibration quality)
 median absolute error <= 20%
 median signed error between -10% and +10%
 R² diagnostic only
 ```
 
-Any required eval segment with zero samples returns `INSUFFICIENT`, never implicit PASS.
+Any required eval segment with zero samples returns `INSUFFICIENT`, never implicit PASS. **No Exit condition depends on a real-play sample count.**
+
+How Unified Scoring (§12.4) treats a candidate with `horizon_complete=false` is deferred to Phase 2, together with the `ActionCandidate.confidence` aggregation formula (§12.3).
 
 ### Phase 1
 
