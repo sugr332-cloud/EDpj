@@ -11,7 +11,7 @@
 
 原則として、仕様書にない機能を先行実装しない。CLIで取得・状態復元・較正・スコアリングを成立させ、その後UIを実装する。
 
-最大の設計原則は **State Driven / Unified Scoring** である。Mining Anchor やユーザー指定の帰投先は実装しない。
+最大の設計原則は **State Driven / Unified Scoring** である。Mining Anchor やユーザー指定の帰投先は実装しない。ただし、売却後に採掘状態へ戻るための通常の復路は状態から自動導出し、同一の行動サイクルとして評価する。
 
 ## 2. Repository Structure
 
@@ -46,7 +46,7 @@ EDpj/
 │   │   └── time.py
 │   ├── mining/
 │   │   ├── state.py
-│   │   ├── yield.py
+│   │   ├── yield_model.py
 │   │   ├── price.py
 │   │   └── scorer.py
 │   ├── bio/
@@ -79,6 +79,8 @@ EDpj/
 ├── docker-compose.yml
 └── README.md
 ```
+
+`yield.py` は Python の予約語と衝突するため使用しない。採掘期待量モデルは `yield_model.py` とする。
 
 ## 3. Runtime Model
 
@@ -142,6 +144,8 @@ Phase 0-Aで以下を読み取る。
 
 読み取り専用。ファイルがない、不完全、一時的に読めない場合でもプロセス全体を停止せず `NO_DATA` / `STALE` として扱う。
 
+`Market.json` は **Docked イベントをトリガーとしてキャプチャする**。Market.json は次回のドックで上書きされ得るため、Docked 時点の内容を raw payload として保存し、`market_snapshots` に `source='journal'` として取り込む。EDDN由来の観測とは source を分離するが、同一テーブルで保持できるものとする。
+
 ### 4.3 State reducer
 
 Journal と state files を統合して singleton `player_state` と `cargo_state` を更新する。
@@ -192,24 +196,33 @@ start event → end event = timing sample
 
 ### 5.3 Supercruise
 
-`SupercruiseEntry` → `SupercruiseExit` を基本区間とする。
+SC区間の開始イベントは以下の両方を扱う。
 
-距離は同一Journalから以下の順で復元する。
+```text
+SupercruiseEntry → SupercruiseExit
+FSDJump          → SupercruiseExit
+```
 
-1. `Docked` 対象に関連付け可能な到着星情報
-2. `Scan` の天体情報
-3. `ApproachBody` と直前の `Scan`
-4. 不明なら NULL
+理由は、`FSDJump` 到着直後は既にスーパークルーズ状態であり、通常 `SupercruiseEntry` が発生しないためである。後者を採用しないと、ジャンプ到着→ステーション巡航という主要なSCサンプルが欠落する。
 
-距離モデル採用条件:
+同一システム内の再突入は `SupercruiseEntry`、ジャンプ到着後は `FSDJump` を開始点とする。
+
+距離は同一Journalおよび静的body/station情報から可能な範囲で復元する。
+
+距離モデル用SCサンプルは、終了イベントの後に次の条件を満たすイベント列を持つものだけ採用する。
 
 ```text
 SupercruiseExit
-  → 120秒以内
-  → Docked または ApproachBody
+  ↓
+  FSDJump または SupercruiseEntry が発生する前に
+  Docked または ApproachBody
 ```
 
-条件を満たさないSCは時間統計には使えるが距離モデルfitには混ぜない。
+**固定120秒フィルタを使用しない。** `SupercruiseExit → Docked` の長さはドッキング時間やstation typeと相関し得るため、時間窓による欠損を作らない。
+
+`Docked` または `ApproachBody` に到達する前に別の `FSDJump` / `SupercruiseEntry` が発生した場合、そのSC区間は距離モデル用として不採用とする。
+
+SCの終了時刻は `SupercruiseExit`、dock区間は別途 `Docked` 等を使って抽出し、区間を二重計上しない。
 
 Phase 0でSpansh body/station importは必須にしない。
 
@@ -256,6 +269,8 @@ signed_error   = (predicted - actual) / actual
 
 Go/No-Go はeval側の誤差のみで判定する。
 
+**評価区分が0件の場合はPASSにしてはならず `INSUFFICIENT` とする。** bucket統合はfit側の件数だけで決めず、統合後にfit/eval双方の件数を検証する。evalが0件となる区分は `INSUFFICIENT` として扱い、全体PASSへすり替えない。
+
 ### 6.3 SC buckets
 
 初期:
@@ -268,7 +283,7 @@ Go/No-Go はeval側の誤差のみで判定する。
 50,000+ ls
 ```
 
-20 samples未満の区分は隣接区分と統合する。統合結果はmodel metadataへ保存する。
+20 samples未満の区分は隣接区分との統合候補とする。統合判断後、fit/eval双方にサンプルが存在することを確認する。evalが0件ならその区分の判定は `INSUFFICIENT`。統合結果と件数はmodel metadataへ保存する。
 
 ### 6.4 Mining cycle calibration
 
@@ -287,11 +302,11 @@ stations
 commodities
 ```
 
-`systems` は `system_address`、座標、name、source を保持。
+`systems` は `system_address`、座標、name、sourceを保持。
 
-`bodies` は body type、sub type、arrival LS、gravity、radius、atmosphere、landable 等を保持。
+`bodies` は body type、sub type、arrival LS、gravity、radius、atmosphere、landable 等を保持する。リング情報を静的データとして利用する場合は `rings JSONB` を保持し、少なくとも ring type / inner radius / outer radius / composition 等を表現できる構造とする。
 
-`stations` は station type、arrival LS、landing pad、Fleet Carrier、Vista Genomics 等を保持。
+`stations` は station type、arrival LS、landing pad、Fleet Carrier、Vista Genomics 等を保持する。
 
 ### 7.2 Market
 
@@ -308,6 +323,8 @@ observed_at
 received_at
 source
 ```
+
+`source` は少なくとも `eddn` / `journal` を区別する。
 
 `market_latest` は `(station_id, commodity_id)` の最新 `observed_at` を保持する normal table とする。MVPではmaterialized view refreshに依存せず upsert する。
 
@@ -349,9 +366,12 @@ updated_at
 mining_anchor
 GET /api/mining/anchor
 PUT /api/mining/anchor
-return_to_anchor
+return_to_anchor DTO
 anchor UI
+configured round-trip score
 ```
+
+ただし、**復路そのものは禁止しない**。`mining_sell` の評価では、売却後に次の採掘を再開する状態へ戻るための通常ルートを、直近の採掘状態から自動導出する。
 
 ## 8. State Detection
 
@@ -361,13 +381,15 @@ anchor UI
 has_mining_cargo = any(c.is_ore and c.qty > 0 for c in cargo)
 ```
 
-`mining_active` は cargo の存在だけでは確定しない。
+`mining_active` はcargoの存在だけでは確定しない。
 
 補助情報:
 
 - recent `MiningRefined`
 - recent Location at ring body
 - current body is known ring
+
+`last_ring_body_id` は直近の信頼できる `MiningRefined` / ring上Locationから導出する。`bodies.rings` が利用できない環境では「known ring」判定を静的ring情報だけに依存せず、直近 `MiningRefined` と位置履歴による判定へフォールバックする。
 
 ### 8.2 Bio
 
@@ -399,6 +421,31 @@ current body has bio signal → bio_current_body
 nearby unscanned bio candidate → bio_next_system
 unsold bio data → bio_return
 ```
+
+### 8.4 Return target derivation
+
+`mining_sell` の終端を売却ステーション到着だけにしない。売却後の通常復路を状態から導出する。
+
+```text
+return_target =
+  latest credible MiningRefined location's system/body
+  → if unavailable, latest credible mining ring Location
+  → if unavailable, no return target
+```
+
+これはDB設定項目ではなく、Journal/stateから毎回導出される一時的な計算結果である。
+
+return targetを導出できる場合:
+
+```text
+mining_sell horizon
+  = current → sell station
+  + docking / market transaction
+  + sell station → return_target
+  + mining re-entry / positioning overhead
+```
+
+return targetを導出できない場合、`mining_sell` は除外せず `confidence` を低下させ、reasonに「採掘復帰先を導出できない」旨を明示する。実装では保守的な追加時間fallbackを適用してもよいが、ユーザー設定のAnchorを作ってはならない。
 
 ## 9. Routing / Time Service
 
@@ -448,12 +495,25 @@ effective_price = listed_price × penalty
 value = Σ(quantity × effective_price)
 horizon = route(current location, sell station)
           + docking / market transaction
+          + route(sell station, derived return target)
+          + mining re-entry overhead
 score_per_hour = value / horizon_hours
 ```
+
+売却後の復路は、直近採掘状態から自動導出する。ユーザー指定のAnchorではない。
 
 保有済み鉱石の取得コストは0とする。
 
 ### 10.3 Mining Continue
+
+`Mining Continue` は満載した状態での販売価値を基準として評価する。現在cargo量をそのまま `r` に使って将来の追加採掘価値を過小評価してはならない。
+
+```text
+evaluation_cargo = expected cargo after one calibrated mining cycle
+                    capped at cargo_capacity
+```
+
+`expected_effective_sell_price` の `r` は、少なくとも「満載時の評価cargo / demand」で算出する。複数commodityを扱う場合は、本人の過去実績から得た満載時のcommodity compositionを使う。
 
 ```text
 expected_value
@@ -470,7 +530,7 @@ horizon = route(current location, mining ring)
           + mining cycle
 ```
 
-候補ringはbody static dataと本人の過去採掘実績から生成する。
+候補ringはbody static dataと本人の過去採掘実績から生成する。ライブyieldをSpansh static dataだけから推定したことにはしない。
 
 ## 11. Bio Scoring
 
@@ -508,6 +568,8 @@ horizon = route(current location, candidate body)
 
 本人未スキャン候補のみ。
 
+候補生成にはPhase 1で購読・保存した `journal/1` と `fssbodysignals/1` の観測を利用する。市場EDDNだけでは本人未スキャンのbio候補を生成できないため、Phase 1のデータ収集要件に含める。
+
 ### 11.4 Return
 
 ```text
@@ -535,7 +597,7 @@ class NextActionRequest:
 ```python
 class ActionCandidate:
     action: str
-    target: dict
+    target: dict | None
     expected_value: float
     action_horizon_seconds: float
     score_per_hour: float
@@ -543,7 +605,35 @@ class ActionCandidate:
     reason: str
 ```
 
-### 12.3 Selection
+### 12.3 Confidence-aware selection
+
+`confidence` を表示専用の属性にしてはならない。候補選択にも使用する。
+
+初期実装では、最低confidence thresholdを設ける。
+
+```python
+MIN_ACTION_CONFIDENCE = 0.50
+valid = [
+    c for c in candidates
+    if c.action_horizon_seconds > 0
+    and c.confidence >= MIN_ACTION_CONFIDENCE
+]
+```
+
+threshold未満しか存在しない場合は、低confidence候補を勝手にheroへ昇格させず、`next_action="none"` として reason に「候補はあるがconfidence不足」と返す。将来、下側信頼限界によるrankingへ変更する場合は仕様変更として明示する。
+
+confidenceの目安:
+
+```text
+1.00  十分な本人実測 + 新鮮な市場/静的データ
+0.75  十分なモデルだが一部fallback
+0.50  最低限の観測、実績不足
+<0.50 初期仮定 / sparse / target導出不能
+```
+
+候補ごとのconfidence計算は各scorerが担当し、Unified scorerはthresholdと順位だけを扱う。
+
+### 12.4 Selection
 
 ```python
 candidates = []
@@ -552,38 +642,76 @@ if mining_enabled:
 if bio_enabled:
     candidates += bio_scorer.generate(state)
 
-valid = [c for c in candidates if c.action_horizon_seconds > 0]
-hero = max(valid, key=lambda c: c.score_per_hour, default=None)
+valid = [
+    c for c in candidates
+    if c.action_horizon_seconds > 0
+    and c.confidence >= MIN_ACTION_CONFIDENCE
+]
+
+valid.sort(key=lambda c: c.score_per_hour, reverse=True)
+hero = valid[0] if valid else None
+alternatives = valid[1:]
 ```
 
-`hero` が最終的な `next_action` となる。
+同じ状態から実行可能な候補を比較する。特に `mining_sell` は売却後に採掘へ戻る通常復路をhorizonへ含めることで、`mining_continue` と異なる終端状態を理由に構造的に常勝しないようにする。
 
-### 12.4 API
+## 13. API
+
+### 13.1 State
+
+```text
+GET /api/state
+GET /api/state/ship
+GET /api/state/cargo
+```
+
+### 13.2 Unified score
 
 ```text
 POST /api/score/next-action
 ```
 
-Response:
+Request:
+
+```json
+{
+  "state": {},
+  "mining_enabled": true,
+  "bio_enabled": true,
+  "distance_limit_ly": 200
+}
+```
+
+Responseは `target` と `alternatives` で同じ `ActionCandidate` 形状を使用する。
 
 ```json
 {
   "next_action": "mining_sell",
   "target": {
+    "action": "mining_sell",
     "station_id": 99999,
     "commodity": "platinum",
-    "score_per_hour": 304000000,
-    "action_horizon_seconds": 1860,
-    "reason": "現在地から販売まで31分、需要に対して十分な余裕"
+    "expected_value": 420000000,
+    "action_horizon_seconds": 4200,
+    "score_per_hour": 360000000,
+    "confidence": 0.91,
+    "reason": "現在地から販売、採掘復帰先までを含めて評価"
   },
   "alternatives": [
-    {"action": "bio_next_system", "score_per_hour": 103000000},
-    {"action": "mining_continue", "score_per_hour": 82000000}
+    {
+      "action": "bio_next_system",
+      "target": {"body_id": 123456},
+      "expected_value": 120000000,
+      "action_horizon_seconds": 4200,
+      "score_per_hour": 102857142,
+      "confidence": 0.82,
+      "reason": "本人未スキャンのbio候補"
+    }
   ]
 }
 ```
 
-候補なし:
+候補が存在しない場合:
 
 ```json
 {
@@ -594,150 +722,265 @@ Response:
 }
 ```
 
-## 13. EDDN
-
-ZeroMQ subscriberを実装する。
-
-市場観測では:
-
-- `observed_at` = EDDN payloadの観測時刻
-- `received_at` = local receive time
-
-を分離する。
-
-stale 判定は `observed_at`、activity は観測件数で別計算する。
-
-## 14. Feedback
-
-### Mining Sell
-
-Journal `MarketSell` と直前 market observation を対応付ける。
-
-一致しない場合:
+### 13.3 Other APIs
 
 ```text
-matched = false
+GET /api/mining/candidates
+GET /api/mining/multi
+GET /api/bio/system/{system_address}
+GET /api/bio/body/{body_id}
+GET /api/bio/unsold
+GET /api/calibration
+POST /api/calibration/refit
+GET /api/calibration/samples
+WS /ws/state
 ```
 
-とし、無理な推定値で学習しない。
+廃止:
 
-10件以上の実売却を目標に effective price model を検証する。
+```text
+GET /api/mining/anchor
+PUT /api/mining/anchor
+GET /api/mining/candidates/{id}
+```
 
-### Bio
+## 14. EDDN / External Data
 
-`ScanOrganic` / `SellOrganicData` を本人の行動履歴として保存する。売却済みspeciesはFD upside候補から除外する。
+Phase 1では以下を購読・保存する。
 
-## 15. Phase Plan / Exit Criteria
+### 14.1 Market
+
+市場観測を `market_snapshots` に保存し、`observed_at` と `received_at` を分離する。
+
+### 14.2 Bio discovery support
+
+Phase 3の本人未スキャン候補生成に必要なため、以下を購読・保存する。
+
+```text
+journal/1
+fssbodysignals/1
+```
+
+観測はsourceとobserved_atを保持し、既存のbody/bio signalモデルへupsertする。
+
+市場観測だけでbio候補が存在すると仮定しない。
+
+## 15. Feedback / Teacher Data
+
+### 15.1 Mining sell observation
+
+売却時に以下を保存する。
+
+```text
+station_id
+commodity_id
+quantity
+listed_price
+actual_price
+supply
+ demand
+observed_at
+source
+```
+
+`penalty_ratio = actual_price / listed_price` を学習対象とする。
+
+### 15.2 Listed price source
+
+`listed_price` は売却直前の `Market.json` snapshotを優先する。Docked時点でMarket.jsonをraw保存しているため、次のドックによる上書きで教師データが失われない。
+
+EDDNの市場観測だけを売却直前価格の正本として扱わない。
+
+### 15.3 Effective price calibration
+
+初期経験則をfallbackとし、本人の実測売却データが蓄積されたら区分ごとのpenalty modelを較正する。評価データをモデル選択へ混ぜない。
+
+## 16. Phase Plan / Exit Criteria
 
 ### Phase 0-A
 
 - Journal parser
-- Raw event persistence
-- Status/Cargo/Market parser
-- State reducer
+- raw journal persistence
+- Status/Cargo/Market reader
+- Docked時Market snapshot
+- state reducer
 - backfill CLI
+- duplicate handling
+
+Exit:
+
+- Journal fixtures pass
+- Status/Cargo/Market fixtures pass
+- Docked Market capture pass
+- state reconstruction pass
 
 ### Phase 0-B
 
-- jump / SC / dock / undock extraction
-- mining cycle extraction
-- SC distance recovery
-- incomplete pair rejection
+- jump timing
+- SC timing with `FSDJump` and `SupercruiseEntry` starts
+- event-sequence-based SC distance sample filtering
+- dock/undock
+- mining cycle
+- bio timing
+- route_plot collection
+
+Exit:
+
+- FSDJump-origin SC sample is extracted
+- no fixed 120-second SC distance filter
+- intervening FSDJump/SupercruiseEntry invalidates the preceding SC distance sample
+- timing samples are session-safe
 
 ### Phase 0-C
 
 - robust calibration
-- chronological 70/30 holdout
-- session boundary protection
-- SC bucket merge
-- metrics output
+- 30h history target
+- approximately 20 timing samples per required calibration where applicable
+- chronological 70/30 fit/eval
+- bucket merge
+- insufficient-data status
 
-Go/No-Go目標:
+Exit:
 
-- 30h以上のJournal
-- jump/SC/dock 等20 samples以上を目安
-- eval median absolute error ≤20%
-- median signed error ±10%
-- R²は診断のみ
+```text
+median absolute error <= 20%
+median signed error between -10% and +10%
+R² diagnostic only
+```
+
+Any required eval segment with zero samples returns `INSUFFICIENT`, never implicit PASS.
 
 ### Phase 1
 
-- EDDN
-- static data
-- market_latest upsert
-- state integration
+- EDDN market
+- `journal/1`
+- `fssbodysignals/1`
+- static DB
+- market_latest
+- state API
 
-### Phase 2 Mining
+Exit:
 
-- candidate generation
+- fresh market observation available
+- bio signal observation available
+- state endpoint returns coherent state
+
+### Phase 2 — Mining
+
+- mining candidates
 - effective price
-- mining sell score
-- mining continue/start score
-- actual feedback
-- 10 real sales
-- effective price prediction median error ≤10%目標
-- Anchor依存ゼロ
+- start/continue/sell
+- derived mining return target
+- confidence-aware selection
+- feedback capture
 
-### Phase 3 Bio
+Exit:
 
-- current body / next system / return
-- 10 real landing/sample observations
-- time prediction median error ≤25%目標
-- sold species exclusion
+- 10 real sales captured
+- effective price median error <= 10% where sample sufficiency permits
+- sell horizon includes derived return leg
+- continue price evaluation uses full-capacity / expected post-cycle cargo ratio
+- no Anchor implementation
 
-### Phase 4 UI
+### Phase 3 — Bio
+
+- current body
+- next system
+- return
+- 10 landings / sample observations target
+- time prediction median error <= 25%
+- sold species FD exclusion
+
+Exit:
+
+-本人未スキャン候補が実データから生成できる
+- FD確定と未売却を混同しない
+
+### Phase 4 — UI
 
 - hero action
 - alternatives
 - current state
 - freshness
 - confidence
-- reason / estimated time
-- manual Mining-only / Bio-only toggle
-- Anchor UIなし
+- reason / horizon
+- manual Mining/Bio mode toggle
 
-## 16. Test Requirements
+No Anchor UI.
+
+## 17. Tests
 
 ### Unit
 
 - Journal UTC parsing
 - duplicate `(file,line)` handling
 - Status/Cargo/Market parsing
+- Docked Market capture
 - laden FSD range
-- effective price boundaries
+- effective price boundary values
+- full-capacity ratio for mining continue
 - sparse SC bucket merge
-- session-safe 70/30 split
-- mining state detection
-- bio state detection
-- score selection
-- no-candidate behavior
+- zero-eval => INSUFFICIENT
+- session-safe split
+- FSDJump-origin SC extraction
+- event-sequence SC termination
+- mining/bio state detection
+- derived mining return target
+- confidence threshold
+- no candidate
 
 ### Integration
 
-- Journal backfill → state
-- EDDN → market_latest
-- state → candidate generation
-- candidate → unified score
-- MarketSell → feedback
+```text
+Journal → state
+Docked → Market snapshot → feedback
+EDDN → market_latest
+journal/1 + fssbodysignals/1 → bio signal
+state → mining candidate
+state → bio candidate
+candidate → unified score
+MarketSell → feedback
+```
 
-### Regression
+### Regression: forbidden features
 
-- Anchor table is absent
-- Anchor API is absent
-- `return_to_anchor` is absent
-- no scoring path calculates a configured round trip
-- Mining Sell with ore cargo does not require `mining_active`
-- bio sold data cannot create FD upside
+以下が存在しないことを自動テストする。
 
-## 17. Implementation Rules
+```text
+mining_anchor table
+GET /api/mining/anchor
+PUT /api/mining/anchor
+return_to_anchor DTO
+anchor UI
+configured round-trip score
+app/mining/yield.py
+```
 
-1. CLI-firstで成立させる。
-2. 仕様にない機能を先行実装しない。
-3. 実測値と推定値をDB/APIで区別する。
-4. EDDNのfreshnessとactivityを混同しない。
-5. route plotをFSD rangeと混同しない。
-6. evalデータをfitへ漏らさない。
-7. 不確実なFirst Discoveryを確定値として扱わない。
-8. Mining Anchor / 帰投先指定を実装しない。
-9. 最終的なhero actionの選択はfrontendではなくbackend scoring serviceで行う。
-10. すべての提案はユーザーの手動操作を前提とする。
+また、以下を回帰テストする。
+
+- Mining Sellは`mining_active`を必須としない
+- 売却候補はore cargoだけで生成可能
+- Mining Sellは片道だけのhorizonを使用しない
+- Mining Continueは現在cargo量だけでprice penaltyを計算しない
+- confidence不足候補をheroにしない
+- sold bio speciesにFD upsideを付与しない
+
+## 18. Implementation Order
+
+```text
+1. Journal parser / raw persistence
+2. Status/Cargo/Market reader
+3. Docked Market snapshot
+4. State reducer
+5. Timing extraction (FSDJump-origin SC first)
+6. Calibration + INSUFFICIENT handling
+7. Static import + EDDN + journal/1 + fssbodysignals/1
+8. Mining candidate/scorer
+9. Bio candidate/scorer
+10. Unified confidence-aware scorer
+11. API
+12. CLI verification
+13. UI
+```
+
+各段階でCLIとテストを通してから次段階へ進む。
