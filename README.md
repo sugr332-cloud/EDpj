@@ -14,14 +14,16 @@ Phase 0-A:
 
 Phase 0-B（`app/journal/timing.py`, `app/db/models/timing.py`）:
 - セグメント種別: `jump` / `supercruise` / `dock` / `undock` / `descent` / `ascent` / `mining_cycle` / `bio_sample` / `route_plot`
-- supercruiseは `SupercruiseEntry` **または** `FSDJump` を起点として扱う（ジャンプ到着直後は通常SupercruiseEntryが発生しないため）
-- 距離モデル対象の採否は固定120秒フィルタを使わず、`SupercruiseExit` の後に次の `FSDJump`/`SupercruiseEntry` が来る前に `Docked`/`ApproachBody` に到達したかで判定する
-- `distance_ls` は `Docked` の `DistFromStarLS` からのみ取得し、取れない場合は推定せず `NULL`（`NO_DATA`）のままにする
+- supercruiseは `SupercruiseEntry` **または** `FSDJump` を起点として扱う（ジャンプ到着直後は通常SupercruiseEntryが発生しないため）。`duration_seconds`（開始→`SupercruiseExit`）はその後の経過に関わらず有効なタイミングサンプルである
+- `reached_known_target`（旧`valid_for_distance_model`）は固定120秒フィルタを使わず、`SupercruiseExit` の後に次の `FSDJump`/`SupercruiseEntry` が来る前に `Docked`/`ApproachBody` に到達したかを記録する。これは「既知の目的地で終わったか」のフラグであり、後述の理由により距離モデルの採否フラグではない
 - `route_plot` はNavRoute.jsonをDocked/Market.jsonと同じ相関方式（直近の`NavRoute`イベントとの時刻突合）で読み、完全に飛び切ったルートのみサンプル化する（distance/detour_factorの算出はPhase 1の静的座標データ待ち）
 
-`edpj journal backfill` 実行時にPhase 0-A/0-Bの両方が走り、`timing_samples` のセグメント別累計件数と `supercruise` の距離モデル対象件数（SC interval Go/No-Go判定に使う数値）を表示する。
+**`arrival_dist_from_star_ls` に関する重要な注意（実データ検証で発覚）:**
+この値は `Docked` の `DistFromStarLS`（＝そのステーション/天体が恒星から静的に何LS離れているか）から取得しており、`ApproachBody` 終端の場合はそもそもJournalに当該フィールドが存在しないため`NULL`（`NO_DATA`、推定はしない）のままになる。**これは「SC中に実際に移動した距離」ではない。** SC開始地点の位置も分からないため、Journalのみから「SC移動距離 → 所要時間」の較正モデルを作ることは現状できない。`duration_seconds` 自体（全supercruiseサンプルで有効）はPhase 0-Cの所要時間較正にそのまま使えるが、距離ベースのbucket較正（`SPECIFICATION_V0.4.md` §14.3）を成立させるには別の距離ソース（Spansh静的座標＋SC開始位置の復元など）が必要で、これは未決定・未実装。
 
-Phase 0-C（calibration）以降は未着手。
+`edpj journal backfill` 実行時にPhase 0-A/0-Bの両方が走り、`timing_samples` のセグメント別累計件数（＝所要時間サンプル数）と `supercruise` のreached_known_target件数を表示する。
+
+Phase 0-C（calibration）以降は未着手。距離モデルの扱いについて仕様書側（`SPECIFICATION_V0.4.md` §14.3 / `IMPLEMENTATION_SPEC_V0.2.md` §6.3）の改訂を検討中。
 
 ## セットアップ
 
@@ -48,7 +50,7 @@ edpj journal backfill --dir <Elite Dangerous journal directory>
 edpj state show
 ```
 
-`backfill` は次を表示する: files scanned / lines scanned / inserted / skipped duplicate / invalid lines / first event / last event / timing samples（セグメント別累計、うちsupercruiseは距離モデル対象件数も） / route_plot samples累計。
+`backfill` は次を表示する: files scanned / lines scanned / inserted / skipped duplicate / invalid lines / first event / last event / timing samples（セグメント別累計） / supercruiseのreached_known_target件数 / route_plot samples累計。
 
 ## テスト
 

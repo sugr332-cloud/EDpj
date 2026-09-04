@@ -46,11 +46,15 @@ class BackfillSummary:
     first_event: dt.datetime | None
     last_event: dt.datetime | None
     # Phase 0-B: cumulative totals in the DB after this run, keyed by
-    # segment_type — e.g. {"supercruise": 42, "jump": 30, ...}. Lets the
-    # CLI report the SC-interval sample count the Phase 0-B/0-C Go/No-Go
-    # decision needs, without a separate `edpj timing` command.
+    # segment_type — e.g. {"supercruise": 42, "jump": 30, ...}. Every
+    # supercruise row's duration_seconds is a valid timing sample on its
+    # own; supercruise_reached_target_total is a separate, narrower count
+    # of legs that ended at a known Docked/ApproachBody target rather than
+    # being superseded by another jump/SC-entry — it is NOT a "distance
+    # model eligible" count (see app/journal/timing.py's module docstring
+    # for why arrival_dist_from_star_ls isn't supercruise travel distance).
     timing_sample_totals: dict[str, int] = field(default_factory=dict)
-    supercruise_distance_eligible_total: int = 0
+    supercruise_reached_target_total: int = 0
     route_plot_samples_total: int = 0
 
 
@@ -218,8 +222,8 @@ def _extract_timing(directory: Path, session: Session) -> None:
             "start_time": s.start_time,
             "end_time": s.end_time,
             "duration_seconds": s.duration_seconds,
-            "distance_ls": s.distance_ls,
-            "valid_for_distance_model": s.valid_for_distance_model,
+            "arrival_dist_from_star_ls": s.arrival_dist_from_star_ls,
+            "reached_known_target": s.reached_known_target,
             "extra": s.extra,
         }
         for s in extract_all_timing_samples(events)
@@ -254,14 +258,14 @@ def _timing_totals(session: Session) -> tuple[dict[str, int], int, int]:
         .all()
     )
     totals = {segment_type: count for segment_type, count in counts}
-    sc_eligible = (
+    sc_reached_target = (
         session.query(func.count(TimingSample.id))
-        .filter(TimingSample.segment_type == "supercruise", TimingSample.valid_for_distance_model.is_(True))
+        .filter(TimingSample.segment_type == "supercruise", TimingSample.reached_known_target.is_(True))
         .scalar()
         or 0
     )
     route_plot_total = session.query(func.count(RoutePlotSample.id)).scalar() or 0
-    return totals, sc_eligible, route_plot_total
+    return totals, sc_reached_target, route_plot_total
 
 
 def _reduce_state(directory: Path, session: Session) -> None:
@@ -283,9 +287,9 @@ def run_backfill(directory: Path, session: Session) -> BackfillSummary:
     _extract_timing(directory, session)
     _reduce_state(directory, session)
 
-    totals, sc_eligible, route_plot_total = _timing_totals(session)
+    totals, sc_reached_target, route_plot_total = _timing_totals(session)
     summary.timing_sample_totals = totals
-    summary.supercruise_distance_eligible_total = sc_eligible
+    summary.supercruise_reached_target_total = sc_reached_target
     summary.route_plot_samples_total = route_plot_total
     return summary
 
@@ -308,11 +312,14 @@ def backfill_command(
     typer.echo(f"invalid lines: {summary.invalid_lines}")
     typer.echo(f"first event: {summary.first_event.isoformat() if summary.first_event else 'N/A'}")
     typer.echo(f"last event: {summary.last_event.isoformat() if summary.last_event else 'N/A'}")
-    typer.echo("timing samples (cumulative):")
+    typer.echo("timing samples (cumulative, duration_seconds valid for every row below):")
     if summary.timing_sample_totals:
         for segment_type in sorted(summary.timing_sample_totals):
             typer.echo(f"  {segment_type}: {summary.timing_sample_totals[segment_type]}")
     else:
         typer.echo("  (none)")
-    typer.echo(f"  supercruise (distance-model eligible): {summary.supercruise_distance_eligible_total}")
+    typer.echo(
+        f"  supercruise (reached a known Docked/ApproachBody target): {summary.supercruise_reached_target_total}"
+        " -- NOT a distance-model figure, see app/journal/timing.py"
+    )
     typer.echo(f"route_plot samples (cumulative): {summary.route_plot_samples_total}")

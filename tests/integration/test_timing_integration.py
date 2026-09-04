@@ -42,7 +42,7 @@ def test_backfill_extracts_all_segment_types(journal_dir, db_session):
     }
 
     assert summary.timing_sample_totals == counts
-    assert summary.supercruise_distance_eligible_total == 2  # both SC legs reached Docked/ApproachBody
+    assert summary.supercruise_reached_target_total == 2  # both SC legs reached Docked/ApproachBody
     assert summary.route_plot_samples_total == 1
 
 
@@ -59,12 +59,12 @@ def test_supercruise_sample_details(journal_dir, db_session):
 
     first, second = sc_samples
     assert first.duration_seconds == 300
-    assert first.valid_for_distance_model is True
-    assert first.distance_ls == 450.0  # from Docked's DistFromStarLS
+    assert first.reached_known_target is True
+    assert first.arrival_dist_from_star_ls == 450.0  # from Docked's DistFromStarLS
 
     assert second.duration_seconds == 75
-    assert second.valid_for_distance_model is True
-    assert second.distance_ls is None  # ApproachBody carries no DistFromStarLS -> NO_DATA
+    assert second.reached_known_target is True
+    assert second.arrival_dist_from_star_ls is None  # ApproachBody carries no DistFromStarLS -> NO_DATA
 
 
 def test_route_plot_sample_persisted(journal_dir, db_session):

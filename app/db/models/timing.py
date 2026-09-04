@@ -10,6 +10,15 @@ boundary.
 `route_plot_samples` is deliberately separate: it has no `duration_seconds`
 notion (a route can span many jumps) and stores JSON leg data rather than a
 single start/end pair.
+
+`arrival_dist_from_star_ls` (supercruise rows only) is the terminating
+Docked event's `DistFromStarLS` — that station's static distance from the
+system's main star, NOT the distance actually traveled during the
+supercruise leg (Elite Dangerous's journal has no such field, and the SC
+start position generally isn't known either). Do not use it as
+distance-to-duration calibration training data; see app/journal/timing.py's
+module docstring for the full reasoning. `duration_seconds` itself is a
+valid timing sample regardless of `reached_known_target`.
 """
 from __future__ import annotations
 
@@ -46,8 +55,8 @@ class TimingSample(Base):
     end_time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
 
-    distance_ls: Mapped[float | None] = mapped_column(Float, nullable=True)
-    valid_for_distance_model: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    arrival_dist_from_star_ls: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reached_known_target: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     extra: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     inserted_at: Mapped[dt.datetime] = mapped_column(

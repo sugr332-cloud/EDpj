@@ -9,11 +9,24 @@ Spec (IMPLEMENTATION_SPEC_V0.2 section 5):
     bio_sample, mining_cycle, route_plot.
   - Supercruise is the special case: its start is SupercruiseEntry *or*
     FSDJump (arrival is already supercruise — SupercruiseEntry normally
-    doesn't fire after a jump), and a sample only counts toward the
-    *distance* model if, after SupercruiseExit, a Docked or ApproachBody
-    is reached before the next FSDJump/SupercruiseEntry. No fixed 120s
-    filter. `distance_ls` itself is read from Docked's `DistFromStarLS`
-    when present and left `None` otherwise — never estimated.
+    doesn't fire after a jump), and `duration_seconds` (SupercruiseEntry/
+    FSDJump -> SupercruiseExit) is a trustworthy timing sample regardless
+    of what happens afterward. `reached_known_target` separately records
+    whether, after SupercruiseExit, a Docked or ApproachBody was reached
+    before the next FSDJump/SupercruiseEntry (event-sequence based, no
+    fixed 120s window) — i.e. whether this leg ended at an identifiable
+    destination rather than being superseded by another jump/SC-entry.
+
+    IMPORTANT: `arrival_dist_from_star_ls` (read from the terminating
+    Docked event's `DistFromStarLS`, when present) is that station/body's
+    static distance from the system's main star — NOT the distance the
+    ship actually traveled during this supercruise leg. Elite Dangerous's
+    journal has no field for real SC travel distance (no trajectory/speed
+    history), and the SC start position is generally unknown too, so this
+    value cannot be used to build a distance -> duration calibration model
+    on its own. It's kept because it's independently useful data (e.g. for
+    later routing/time estimates from system entry to a station), not as
+    supercruise-distance training data.
   - route_plot: Phase 0 does not attempt to reconstruct history; only a
     complete *forward* NavRoute execution (every leg flown in order, no
     NavRouteClear/deviation in between) is stored as a sample, with no
@@ -40,8 +53,10 @@ class TimingSampleData:
     start_time: dt.datetime
     end_time: dt.datetime
     duration_seconds: float
-    distance_ls: float | None = None
-    valid_for_distance_model: bool = False
+    # Supercruise-only; see module docstring for why this is NOT a
+    # supercruise-travel-distance figure.
+    arrival_dist_from_star_ls: float | None = None
+    reached_known_target: bool = False
     extra: dict = field(default_factory=dict)
 
 
@@ -59,8 +74,8 @@ def _build_sample(
     start: TimestampedEvent,
     end: TimestampedEvent,
     *,
-    distance_ls: float | None = None,
-    valid_for_distance_model: bool = False,
+    arrival_dist_from_star_ls: float | None = None,
+    reached_known_target: bool = False,
     extra: dict | None = None,
 ) -> TimingSampleData:
     return TimingSampleData(
@@ -72,8 +87,8 @@ def _build_sample(
         start_time=start.timestamp,
         end_time=end.timestamp,
         duration_seconds=(end.timestamp - start.timestamp).total_seconds(),
-        distance_ls=distance_ls,
-        valid_for_distance_model=valid_for_distance_model,
+        arrival_dist_from_star_ls=arrival_dist_from_star_ls,
+        reached_known_target=reached_known_target,
         extra=extra or {},
     )
 
@@ -141,12 +156,18 @@ def extract_supercruise_samples(events: Iterable[TimestampedEvent]) -> list[Timi
     open_start: TimestampedEvent | None = None
     pending: tuple[TimestampedEvent, TimestampedEvent] | None = None
 
-    def resolve(eligible: bool, distance_ls: float | None) -> None:
+    def resolve(reached_target: bool, arrival_dist_from_star_ls: float | None) -> None:
         nonlocal pending
         assert pending is not None
         start, end = pending
         samples.append(
-            _build_sample("supercruise", start, end, distance_ls=distance_ls, valid_for_distance_model=eligible)
+            _build_sample(
+                "supercruise",
+                start,
+                end,
+                arrival_dist_from_star_ls=arrival_dist_from_star_ls,
+                reached_known_target=reached_target,
+            )
         )
         pending = None
 
@@ -155,11 +176,11 @@ def extract_supercruise_samples(events: Iterable[TimestampedEvent]) -> list[Timi
 
         if pending is not None:
             if is_departure:
-                resolve(eligible=False, distance_ls=None)
+                resolve(reached_target=False, arrival_dist_from_star_ls=None)
             elif e.event_type == ev.DOCKED:
-                resolve(eligible=True, distance_ls=e.payload.get("DistFromStarLS"))
+                resolve(reached_target=True, arrival_dist_from_star_ls=e.payload.get("DistFromStarLS"))
             elif e.event_type == ev.APPROACH_BODY:
-                resolve(eligible=True, distance_ls=e.payload.get("DistFromStarLS"))
+                resolve(reached_target=True, arrival_dist_from_star_ls=e.payload.get("DistFromStarLS"))
 
         if is_departure:
             open_start = e  # supersedes any unmatched previous open_start
@@ -168,7 +189,7 @@ def extract_supercruise_samples(events: Iterable[TimestampedEvent]) -> list[Timi
             open_start = None
 
     if pending is not None:
-        resolve(eligible=False, distance_ls=None)
+        resolve(reached_target=False, arrival_dist_from_star_ls=None)
 
     return samples
 

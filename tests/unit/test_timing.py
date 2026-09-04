@@ -51,7 +51,7 @@ def test_jump_sample_unmatched_start_produces_nothing():
     assert extract_jump_samples(events) == []
 
 
-def test_supercruise_eligible_via_docked_with_distance():
+def test_supercruise_reaches_target_via_docked_with_arrival_distance():
     events = [
         E(0, "FSDJump", {"StarSystem": "Deciat"}, line=1),
         E(300, "SupercruiseExit", {}, line=2),
@@ -61,11 +61,11 @@ def test_supercruise_eligible_via_docked_with_distance():
     assert len(samples) == 1
     s = samples[0]
     assert s.duration_seconds == 300
-    assert s.valid_for_distance_model is True
-    assert s.distance_ls == 512.3
+    assert s.reached_known_target is True
+    assert s.arrival_dist_from_star_ls == 512.3
 
 
-def test_supercruise_eligible_via_approach_body_without_distance_field():
+def test_supercruise_reaches_target_via_approach_body_without_distance_field():
     events = [
         E(0, "SupercruiseEntry", {}, line=1),
         E(150, "SupercruiseExit", {}, line=2),
@@ -73,11 +73,11 @@ def test_supercruise_eligible_via_approach_body_without_distance_field():
     ]
     samples = extract_supercruise_samples(events)
     assert len(samples) == 1
-    assert samples[0].valid_for_distance_model is True
-    assert samples[0].distance_ls is None  # ApproachBody carries no DistFromStarLS -> NO_DATA, not guessed
+    assert samples[0].reached_known_target is True
+    assert samples[0].arrival_dist_from_star_ls is None  # ApproachBody carries no DistFromStarLS -> NO_DATA, not guessed
 
 
-def test_supercruise_ineligible_when_next_departure_precedes_a_body():
+def test_supercruise_does_not_reach_target_when_next_departure_precedes_a_body():
     events = [
         E(0, "FSDJump", {"StarSystem": "Deciat"}, line=1),
         E(90, "SupercruiseExit", {}, line=2),
@@ -86,13 +86,13 @@ def test_supercruise_ineligible_when_next_departure_precedes_a_body():
     samples = extract_supercruise_samples(events)
     assert len(samples) == 1
     assert samples[0].duration_seconds == 90
-    assert samples[0].valid_for_distance_model is False
-    assert samples[0].distance_ls is None
+    assert samples[0].reached_known_target is False
+    assert samples[0].arrival_dist_from_star_ls is None
 
 
 def test_supercruise_has_no_fixed_120_second_filter():
     """The SupercruiseExit -> Docked gap (here 900s, far past any 120s
-    cutoff) must not affect eligibility — the spec explicitly forbids a
+    cutoff) must not affect whether a target was reached — the spec explicitly forbids a
     fixed time-window filter for this check. `duration_seconds` measures
     the supercruise leg itself (FSDJump -> SupercruiseExit = 100s); the gap
     afterward belongs to docking, not supercruise."""
@@ -104,7 +104,7 @@ def test_supercruise_has_no_fixed_120_second_filter():
     samples = extract_supercruise_samples(events)
     assert len(samples) == 1
     assert samples[0].duration_seconds == 100
-    assert samples[0].valid_for_distance_model is True
+    assert samples[0].reached_known_target is True
 
 
 def test_supercruise_multi_jump_route_without_exit_produces_no_sample():

@@ -3,6 +3,10 @@
 Revision ID: 0002_phase_0b_timing
 Revises: 0001_phase_0a_initial
 Create Date: 2026-09-05
+
+`arrival_dist_from_star_ls` is a station/body's static distance from its
+system's main star (from Docked's DistFromStarLS) — not supercruise travel
+distance. See app/journal/timing.py's module docstring.
 """
 from __future__ import annotations
 
@@ -29,8 +33,8 @@ def upgrade() -> None:
         sa.Column("start_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column("end_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column("duration_seconds", sa.Float(), nullable=False),
-        sa.Column("distance_ls", sa.Float(), nullable=True),
-        sa.Column("valid_for_distance_model", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("arrival_dist_from_star_ls", sa.Float(), nullable=True),
+        sa.Column("reached_known_target", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("extra", sa.JSON(), nullable=False),
         sa.Column("inserted_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint(
