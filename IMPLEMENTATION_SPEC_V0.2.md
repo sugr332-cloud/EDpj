@@ -1,9 +1,9 @@
 # EDpj Implementation Specification
 
-**Version:** 0.2  
+**Version:** 0.3  
 **Status:** Implementation Baseline  
 **Date:** 2026-09-04  
-**Target Specification:** `SPECIFICATION_V0.4.md`
+**Target Specification:** `SPECIFICATION_V0.5.md`
 
 ## 1. Purpose
 
@@ -193,48 +193,6 @@ start event → end event = timing sample
 - `bio_sample`
 - `mining_cycle`
 - `route_plot`
-
-### 5.3 Supercruise
-
-SC区間の開始イベントは以下の両方を扱う。
-
-```text
-SupercruiseEntry → SupercruiseExit
-FSDJump          → SupercruiseExit
-```
-
-理由は、`FSDJump` 到着直後は既にスーパークルーズ状態であり、通常 `SupercruiseEntry` が発生しないためである。後者を採用しないと、ジャンプ到着→ステーション巡航という主要なSCサンプルが欠落する。
-
-同一システム内の再突入は `SupercruiseEntry`、ジャンプ到着後は `FSDJump` を開始点とする。
-
-距離は同一Journalおよび静的body/station情報から可能な範囲で復元する。
-
-距離モデル用SCサンプルは、終了イベントの後に次の条件を満たすイベント列を持つものだけ採用する。
-
-```text
-SupercruiseExit
-  ↓
-  FSDJump または SupercruiseEntry が発生する前に
-  Docked または ApproachBody
-```
-
-**固定120秒フィルタを使用しない。** `SupercruiseExit → Docked` の長さはドッキング時間やstation typeと相関し得るため、時間窓による欠損を作らない。
-
-`Docked` または `ApproachBody` に到達する前に別の `FSDJump` / `SupercruiseEntry` が発生した場合、そのSC区間は距離モデル用として不採用とする。
-
-SCの終了時刻は `SupercruiseExit`、dock区間は別途 `Docked` 等を使って抽出し、区間を二重計上しない。
-
-Phase 0でSpansh body/station importは必須にしない。
-
-### 5.4 Route plot
-
-`NavRoute` は設定イベントに過ぎないため、過去経路を完全復元できることを前提にしない。
-
-- Phase 0 Go/No-Go対象外
-- `NavRouteClear` を成功サンプルにしない
-- 完全な前方NavRouteだけ `route_plot` として保存
-- 不足時の `detour_factor=1.15`
-- 実測蓄積後に再較正
 
 ## 6. Phase 0-C — Calibration
 
@@ -984,3 +942,156 @@ app/mining/yield.py
 ```
 
 各段階でCLIとテストを通してから次段階へ進む。
+
+## 19. 用語の統一
+
+UI表示・CLI出力では、Elite Dangerous のプレイヤーが実際に使う呼称をそのまま使う。日本語への言い換えはしない。
+
+| UI/CLI表示 | コード識別子 |
+|---|---|
+| スーパークルーズ | `supercruise` |
+| ホンク | `honk` |
+| FSS | `fss` |
+| DSS | `dss` |
+
+補足表記のルール:
+
+- ドキュメント本文で初出時のみ正式名称を併記してよい（例: FSS（全周波数システムスキャナ））。UI上では不要
+- 所要時間の内訳バーなど幅の狭い箇所では `SC` への短縮を許可する。同一画面内で `スーパークルーズ` と `SC` を混在させないこと
+
+## 20. 探索状態の管理
+
+Journalから探索の進捗を復元し、候補の所要時間に反映する。
+
+参照イベント:
+
+| イベント | 意味 |
+|---|---|
+| `FSSDiscoveryScan` | 星系スキャン完了。`BodyCount` も取得 |
+| `FSSAllBodiesFound` | その星系の天体スキャン完了 |
+| `SAAScanComplete` | その天体のプローブ完了 |
+
+```sql
+CREATE TABLE system_discovery (
+    system_address    BIGINT PRIMARY KEY,
+    honked            BOOLEAN NOT NULL DEFAULT FALSE,
+    body_count        INTEGER,
+    all_bodies_found  BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE body_discovery (
+    body_id      BIGINT PRIMARY KEY,
+    fss_scanned  BOOLEAN NOT NULL DEFAULT FALSE,
+    dss_scanned  BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Bio候補の horizon に未完了分を加算する:
+
+```text
+bio_horizon =
+    route(現在地 → 目標星系)
+  + honk_time              星系スキャン未完了なら
+  + fss_time(body_count)   天体スキャン未完了なら
+  + supercruise_time
+  + dss_time               プローブ未完了なら
+  + descent + sample + ascent
+```
+
+`fss_time` は天体数に比例するため、`FSSDiscoveryScan.BodyCount` を説明変数として `timing_samples` に追加し較正する。`honk` / `fss` / `dss` を `segment_type` に追加すること。
+
+プローブ未完了の天体は着陸地点が確定しないため、UIに明示する。
+
+## 21. ターゲットDTOの構造化
+
+`ActionCandidate.target` を `dict` から構造化型に変更する。CLI出力とUIの両方がこの構造から生成される。
+
+```python
+class DiscoveryState:
+    honked: bool
+    fss_scanned: bool
+    dss_scanned: bool
+
+class BioTarget:
+    body_name: str            # 表示用 例 "HIP 20277 A 5 a"
+    system_name: str          # コピー用 例 "HIP 20277"
+    body_suffix: str          # 現地探索用 例 "A 5 a"
+    distance_ls: float
+    gravity: float
+    colony_spacing_m: int
+    discovery: DiscoveryState
+    time_breakdown: dict[str, float]
+    predicted_species: list[SpeciesEstimate]
+
+class MiningTarget:
+    station_name: str
+    system_name: str          # コピー用
+    parent_body_name: str | None   # 惑星ポートの場合の親天体
+    station_type: str
+    distance_ls: float
+    max_landing_pad: str
+    demand: int
+    cargo_demand_ratio: float
+    listed_price: int
+    effective_price: int
+    time_breakdown: dict[str, float]
+```
+
+重要な制約:
+
+- `system_name` は Journal の `StarSystem` フィールドから直接取得すること。`body_name` からの文字列分割で導出してはならない。`Col 285 Sector` 系や `Synuefe` 系は命名規則が異なり分割が破綻する
+- `time_breakdown` は合計値ではなく内訳のまま返す。UIが内訳バーを描画するため
+
+## 22. 到達可能性の判定
+
+積載時ジャンプレンジで到達できない候補を生成段階で除外する。
+
+```text
+候補の各ジャンプ区間について:
+  segment_distance > laden_jump_range → 候補から除外
+```
+
+判定不能な場合は除外せず confidence を下げる。
+
+## 23. 惑星表面のナビゲーション（Phase 3）
+
+`Status.json` の緯度・経度・機首方位を使い、惑星表面でのみ方位表示を提供する。宇宙空間では提供しない（ゲーム内HUDが誘導するため）。
+
+提供する情報:
+
+- 直近の `ScanOrganic` 採取地点から現在地までの距離。同一種で3サンプル取るには種ごとの規定距離（100m〜500m）以上離れる必要があるため
+- `Touchdown` 地点（自船）までの距離と方位
+
+提供**しない**情報:
+
+- 生体コロニーの位置。プローブ後の惑星マップにのみ表示され、Journalに書き出されないため取得不可
+- 星系マップの軌道配置。Spanshが持つのは到着星からの距離のみで、実際の軌道位置ではない。それらしい図を描くとゲーム内表示と一致せず混乱を招く
+
+## 24. UI要件（Phase 4）
+
+候補カードに以下を含める。
+
+**コピー機能**
+- コピー対象は `system_name` のみ。天体名やステーション名は銀河マップの検索欄で使えないため含めない
+- コピー後は一時的なトーストではなく、その候補に「コピー済」状態を保持する。ゲームとの往復で見失わないため
+
+**残り手順の表示**
+- 星系スキャン / 天体スキャン / プローブ の3段階を、完了・未完了（加算時間付き）・これから の3状態で表示
+- `FSDJump` 等のイベント受信時に自動で進行させる
+
+**所要時間の内訳**
+- 積み上げバーで表示。合計だけでなく各段階の内訳を出す
+- 較正不足のモデルが含まれる場合はバッジを付ける
+
+**相対比較**
+- コロニー間隔は絶対値のみでは判断できないため、他属との比較で表示する
+- 需要比率は 25% ラインと 80% ラインを引いた上に現在位置を示す
+
+## 25. 制約（再掲）
+
+- ゲームへの入力自動化を実装しない。読み取りと提案のみ
+- Mining Anchor / ユーザー指定の帰投先を実装しない
+- 取得できないデータを推定で埋めない。`NO_DATA` として扱う
+- 推定値と実測値をDB・API・UIで区別する
