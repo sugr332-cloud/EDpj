@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: edpj
+      POSTGRES_PASSWORD: edpj
+      POSTGRES_DB: edpj
+    ports:
+      - "5432:5432"
+    volumes:
+      - edpj_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  edpj_postgres_data:

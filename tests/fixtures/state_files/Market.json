@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-01-01T12:15:05Z",
+  "event": "Market",
+  "MarketID": 128666762,
+  "StationName": "Farseer Inc",
+  "StarSystem": "Deciat",
+  "Items": [
+    {
+      "id": 128049204,
+      "Name": "$platinum_name;",
+      "Name_Localised": "Platinum",
+      "Category": "$MARKET_category_minerals;",
+      "Category_Localised": "Minerals",
+      "BuyPrice": 0,
+      "SellPrice": 44586,
+      "MeanPrice": 41846,
+      "StockBracket": 0,
+      "DemandBracket": 2,
+      "Stock": 0,
+      "Demand": 178,
+      "Consumer": false,
+      "Producer": false,
+      "Rare": false
+    }
+  ]
+}

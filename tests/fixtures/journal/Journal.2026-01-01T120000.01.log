@@ -1,0 +1,6 @@
+{"timestamp":"2026-01-01T12:00:00Z","event":"LoadGame","Commander":"TestCMDR","ShipID":1,"Ship":"CobraMkIII","GameMode":"Solo","Credits":1000000}
+{"timestamp":"2026-01-01T12:00:01Z","event":"Loadout","Ship":"CobraMkIII","ShipID":1,"CargoCapacity":16}
+{"timestamp":"2026-01-01T12:05:00Z","event":"FSDJump","StarSystem":"Deciat","SystemAddress":123456789,"Body":"Deciat A","BodyID":1,"Docked":false}
+{"timestamp":"2026-01-01T12:10:00Z","event":"SupercruiseExit","StarSystem":"Deciat","Body":"Deciat 2","BodyID":5}
+this line is not valid json at all
+{"timestamp":"2026-01-01T12:15:00Z","event":"Docked","StationName":"Farseer Inc","StarSystem":"Deciat","SystemAddress":123456789,"MarketID":128666762,"StationType":"Outpost"}
