@@ -194,6 +194,48 @@ start event → end event = timing sample
 - `mining_cycle`
 - `route_plot`
 
+### 5.3 Supercruise
+
+SC区間の開始イベントは以下の両方を扱う。
+
+```text
+SupercruiseEntry → SupercruiseExit
+FSDJump          → SupercruiseExit
+```
+
+理由は、`FSDJump` 到着直後は既にスーパークルーズ状態であり、通常 `SupercruiseEntry` が発生しないためである。後者を採用しないと、ジャンプ到着→ステーション巡航という主要なSCサンプルが欠落する。
+
+同一システム内の再突入は `SupercruiseEntry`、ジャンプ到着後は `FSDJump` を開始点とする。
+
+距離は同一Journalおよび静的body/station情報から可能な範囲で復元する。
+
+距離モデル用SCサンプルは、終了イベントの後に次の条件を満たすイベント列を持つものだけ採用する。
+
+```text
+SupercruiseExit
+  ↓
+  FSDJump または SupercruiseEntry が発生する前に
+  Docked または ApproachBody
+```
+
+**固定120秒フィルタを使用しない。** `SupercruiseExit → Docked` の長さはドッキング時間やstation typeと相関し得るため、時間窓による欠損を作らない。
+
+`Docked` または `ApproachBody` に到達する前に別の `FSDJump` / `SupercruiseEntry` が発生した場合、そのSC区間は距離モデル用として不採用とする。
+
+SCの終了時刻は `SupercruiseExit`、dock区間は別途 `Docked` 等を使って抽出し、区間を二重計上しない。
+
+Phase 0でSpansh body/station importは必須にしない。
+
+### 5.4 Route plot
+
+`NavRoute` は設定イベントに過ぎないため、過去経路を完全復元できることを前提にしない。
+
+- Phase 0 Go/No-Go対象外
+- `NavRouteClear` を成功サンプルにしない
+- 完全な前方NavRouteだけ `route_plot` として保存
+- 不足時の `detour_factor=1.15`
+- 実測蓄積後に再較正
+
 ## 6. Phase 0-C — Calibration
 
 ### 6.1 Fit/eval
