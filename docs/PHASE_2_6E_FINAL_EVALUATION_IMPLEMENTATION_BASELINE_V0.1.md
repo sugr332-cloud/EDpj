@@ -1,7 +1,7 @@
 # EDpj Phase 2-6E Final Evaluation Implementation Baseline
 
 **Version:** 0.2
-**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。候補station複数件を1回のarchiveスキャンでまとめてdiscoveryする`discover_commodities_at_stations()`へ統合（当初案は候補station数だけ同じ日を重複取得していたため、実データ投入前に修正）。既存375テスト+新規14テスト、計389テスト全通過。Exit Criteria全項目達成）
+**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。候補station複数件を1回のarchiveスキャンでまとめてdiscoveryする`discover_commodities_at_stations()`へ統合（当初案は候補station数だけ同じ日を重複取得していたため、実データ投入前に修正）。既存375テスト+新規14テスト=389。§14: 実データpilot（discovery）で5同一station targetが同一日付archiveを重複取得する非効率を実測発見、`app/market/predictability.py`に`ensure_days_fetched_batch()`を追加して修正（FetchLogのキー粒度は正しさのため変更せず、1回の呼び出し内でtarget横断のscanをまとめる設計）。既存389テスト+新規5テスト、計394テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Revision note（v0.2、Evaluation Run #1の実行後に発覚した設計ギャップへの対応）**: Evaluation Run #1（実データ）で本人`MarketSnapshot(source='journal')`が0件であることが判明し、§1.1の「評価対象は本人のMarketSnapshotのみ」という設計が、「モデルが実データ上一般に妥当か」と「本人環境で採用してよいか」という2つの異なる問いを暗黙に1本化していたことが分かった。v0.2は§13を追加し、評価を**Adoption Evaluation**（本人MarketSnapshot起点、§7の採用手順の唯一の根拠）と**Model Validation**（実際にDockしたstationから発見した実在commodityが起点、採用判断には使わない）の二層に分離する。§1〜§12の既存決定（Adoption Evaluation側の設計）は変更していない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `51d55e9`）, `docs/PHASE_2_6C_FRESHNESS_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0c7d070`）, `docs/PHASE_2_6D_PLAYER_STATE_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0a1c279`）, `app/backtest/replay.py`, `app/backtest/volatility_evaluation.py`, `app/backtest/freshness_evaluation.py`, `app/backtest/journal_replay.py`, `app/market/predictability.py`, `app/scoring/confidence.py`
@@ -428,3 +428,47 @@ Model Validation（新設、app/backtest/model_validation.py）
 Model Validationの結果（構造的妥当性がGO相当であっても）は、**§7の採用手順を一切トリガーしない**。Model Validationの対象は「本人が実際に見る市場」ではなく「発見できた実在の市場」であり、モデルが実データ上一般に成立することと、本人の実際のRecommendationにその閾値を適用してよいことは別の主張である（§0.1の原則の直接的な帰結）。
 
 Model Validationが確認（または反証）するのは、2-6B/2-6Cが検証しようとしている統計的仮説（volatility_classとforecast errorの順序関係、age_at_t0とforecast errorの単調性）が実データ一般で観測できるかどうかであり、これはAdoption Evaluationが本人データ不足で長期間INSUFFICIENTのままであっても、モデル自体の設計を継続して検証・改善するための独立した材料になる。
+
+## 14. Archive Fetch Batching（実データPilot Runで発見・v0.2内で修正）
+
+### 14.1 発見した問題（実測）
+
+`max_targets=5, window_days_options=(7,)`の実データpilot（discoveryのみ実行）で、選定された5 targetが全て同一station（Hoffman Installation）の異なるcommodityだった。既存の`ensure_days_fetched()`（Phase 2-5A、`app/market/predictability.py`）は`(station_id, commodity_name, date)`単位でしかキャッシュを見ないため、`compute_backtest_results()`が target ごとに`ensure_days_fetched()`を呼ぶ既存実装のままだと、**同じ日付のarchiveファイルをtarget数分（5回）重複ダウンロードする**ことが判明した。7日windowなら35回のダウンロード（本来必要なのは7回）。
+
+これはModel Validation固有の問題ではなく、Adoption Evaluation（`run_evaluation()`）も同じ`compute_backtest_results()`を経由するため同じ非効率を持つ、**Phase 2-5AのArchive fetchキャッシュ設計そのものの問題**である。
+
+### 14.2 修正方針（レビュー提案からの1点の変更）
+
+レビューでは「FetchLogを`(date)`単位のキーへ変更する」という提案があったが、これは採用しなかった。理由は正しさ（correctness）上のリスクがあるため。
+
+`(date)`のみをキーにすると、「ある日付は既にscan済み」という記録が、**そのscanが実際にどのstation×commodityを対象にしていたか**を区別できなくなる。例えば、target Aだけを対象にその日をscanしてFetchLogへ`(date)`のみを記録した場合、後から別のRunでtarget Bを新たに対象へ加えても、「その日は既にscan済み」と誤認してtarget Bのデータを一切抽出せずスキップしてしまう——実際には一度もtarget Bを対象にscanしていないにもかかわらず。
+
+**採用した設計:** `MarketHistoricalFetchLog`のキー粒度（`station_id, commodity_name, date`）は変更しない。代わりに、**1回の呼び出しの中で複数targetをまとめて渡し、その日にまだ未取得のtargetが1つでもあれば、その日のarchiveを1回だけスキャンして、未取得の全targetを同じパスで一括抽出する**（`ensure_days_fetched_batch()`、新設）。
+
+```text
+ensure_days_fetched_batch(targets=[A, B, C], dates=[D1, D2, ...])
+    ↓
+各dateについて
+    ↓
+targets のうち、その date でFetchLogに未記録のものを集める
+    ↓
+1件もなければ次のdateへ（archiveを触らない）
+    ↓
+1件でもあれば、そのdateのarchiveを1回だけstream scan
+    ↓
+未取得だった全targetについて、該当する行を同じpassで抽出
+    ↓
+それぞれのtargetについてMarketHistoricalObservationへ保存し、
+FetchLogへ(station_id, commodity_name, date)を記録
+```
+
+この設計により、**キャッシュの正しさ（後から追加されたtargetが見逃されないこと）を一切犠牲にせずに**、同一Run内でのtarget横断の重複ダウンロードを防止できる（§14.1の5×7=35回が7回になる）。既存の`ensure_days_fetched()`（単一target版）は`ensure_days_fetched_batch()`の薄いラッパーとして残し、`analyze_market()`等の既存呼び出し元には影響を与えない。
+
+### 14.3 Exit Criteria（§11に統合済みの内容の再掲）
+
+- [x] `ensure_days_fetched_batch()`が複数targetに対し、日付ごとに最大1回だけarchiveを取得する（FakeStreamingHttpClientで5 target/1dateでも1回のみのリクエストであることをテスト）
+- [x] `MarketHistoricalFetchLog`のキー粒度が変更されていない（既存2-5Aテストに回帰なし）
+- [x] 後から追加されたtargetが、既にFetchLogにある日付でも正しく（再）scanされることがテストされている（§14.2のcorrectnessリスクに対する直接証拠）
+- [x] `ensure_days_fetched()`（単一target版）が`ensure_days_fetched_batch()`と同じ結果を返す
+- [x] `compute_backtest_results()`（Adoption Evaluation/Model Validation共通コア）が新しいbatch版を使うよう更新されている
+- [x] 既存389テストに回帰がない（394テスト全通過）

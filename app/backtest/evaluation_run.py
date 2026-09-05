@@ -44,7 +44,7 @@ from app.backtest.volatility_evaluation import (
 from app.collectors.eddn_archive import StreamingHttpClient
 from app.db.models.market import MarketSnapshot
 from app.db.models.timing import TimingSample
-from app.market.predictability import ensure_days_fetched
+from app.market.predictability import ensure_days_fetched_batch
 
 # Operational constraint on archive fetch cost (docs/PHASE_2_5A...§1:
 # ~60-112MB/day per station×commodity), not a statistically meaningful
@@ -199,8 +199,15 @@ def compute_backtest_results(
         (fetch_window_start + dt.timedelta(days=offset)).date()
         for offset in range((now.date() - fetch_window_start.date()).days + 1)
     ]
-    for target in targets:
-        ensure_days_fetched(session, target.station_id, target.commodity_name, fetch_dates, client)
+    # Batched across the whole target list, not one ensure_days_fetched()
+    # call per target -- each date's archive file is downloaded/streamed
+    # at most once regardless of how many targets share it (spec §14;
+    # a real Model Validation run found 5 same-station targets over 7
+    # days triggering 35 redundant downloads of the same 7 files before
+    # this fix).
+    ensure_days_fetched_batch(
+        session, [(target.station_id, target.commodity_name) for target in targets], fetch_dates, client
+    )
 
     volatility_by_window: dict[int, OrderingHypothesisResult] = {}
     target_sample_counts: dict[EvaluationTarget, int] = {}

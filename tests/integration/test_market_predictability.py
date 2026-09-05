@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 
 from app.db.models.market import MarketHistoricalFetchLog, MarketHistoricalObservation
-from app.market.predictability import analyze_market, get_predictability
+from app.market.predictability import analyze_market, ensure_days_fetched, ensure_days_fetched_batch, get_predictability
 from tests.integration.test_eddn_archive import FakeStreamingHttpClient, _archive_url, _compress_day, _envelope
 
 NOW = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
@@ -24,6 +24,101 @@ def _payloads_for_window(
         )
         payloads[_archive_url(date)] = _compress_day([envelope])
     return payloads
+
+
+class TestEnsureDaysFetchedBatch:
+    """docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md
+    §14: a real Model Validation run found 5 same-station targets over a
+    7-day window triggering 35 redundant downloads of the same 7 archive
+    files (once per target, per date). This batches the fetch so each
+    date is downloaded at most once regardless of target count, while
+    keeping MarketHistoricalFetchLog's per-target granularity so a
+    genuinely new target is never silently skipped."""
+
+    def test_one_archive_request_per_date_regardless_of_target_count(self, db_session):
+        dates = [NOW.date() - dt.timedelta(days=i) for i in range(3)]
+        payloads = {
+            _archive_url(date): _compress_day(
+                [_envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 1, "demand": 1}])]
+            )
+            for date in dates
+        }
+        client = FakeStreamingHttpClient(payloads)
+        targets = [(100, "platinum"), (100, "gold"), (200, "silver")]
+
+        ensure_days_fetched_batch(db_session, targets, dates, client)
+
+        assert len(client.requested_urls) == 3  # not 3 dates * 3 targets = 9
+
+    def test_extracts_rows_for_each_target_in_one_pass(self, db_session):
+        date = NOW.date()
+        envelopes = [
+            _envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5}]),
+            _envelope(200, f"{date:%Y-%m-%d}T11:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 2}]),
+        ]
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day(envelopes)})
+
+        ensure_days_fetched_batch(db_session, [(100, "platinum"), (200, "gold")], [date], client)
+
+        assert (
+            db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").count()
+            == 1
+        )
+        assert (
+            db_session.query(MarketHistoricalObservation).filter_by(station_id=200, commodity_name="gold").count() == 1
+        )
+
+    def test_second_call_does_not_refetch_already_covered_dates(self, db_session):
+        date = NOW.date()
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day([])})
+        targets = [(100, "platinum")]
+
+        ensure_days_fetched_batch(db_session, targets, [date], client)
+        first_count = len(client.requested_urls)
+        ensure_days_fetched_batch(db_session, targets, [date], client)
+
+        assert len(client.requested_urls) == first_count
+
+    def test_a_target_added_in_a_later_call_is_still_correctly_scanned(self, db_session):
+        # Correctness guarantee that motivates keeping FetchLog's
+        # per-(station, commodity, date) granularity instead of
+        # collapsing it to date-only.
+        date = NOW.date()
+        envelopes = [
+            _envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 1, "demand": 1}]),
+            _envelope(200, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "gold", "sellPrice": 1, "demand": 1}]),
+        ]
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day(envelopes)})
+
+        ensure_days_fetched_batch(db_session, [(100, "platinum")], [date], client)
+        assert (
+            db_session.query(MarketHistoricalObservation).filter_by(station_id=200, commodity_name="gold").count() == 0
+        )
+
+        ensure_days_fetched_batch(db_session, [(200, "gold")], [date], client)
+        assert (
+            db_session.query(MarketHistoricalObservation).filter_by(station_id=200, commodity_name="gold").count() == 1
+        )
+
+
+class TestEnsureDaysFetchedSingleTargetWrapper:
+    def test_matches_batch_behavior_for_one_target(self, db_session):
+        date = NOW.date()
+        envelopes = [_envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5}])]
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day(envelopes)})
+
+        ensure_days_fetched(db_session, 100, "platinum", [date], client)
+
+        assert (
+            db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").count()
+            == 1
+        )
+        assert (
+            db_session.query(MarketHistoricalFetchLog)
+            .filter_by(station_id=100, commodity_name="platinum", date=date)
+            .count()
+            == 1
+        )
 
 
 class TestAnalyzeMarket:

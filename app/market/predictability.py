@@ -19,7 +19,8 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
-from app.collectors.eddn_archive import StreamingHttpClient, fetch_commodity_observations
+from app.collectors.eddn import MalformedEddnMessage, parse_commodity_message
+from app.collectors.eddn_archive import StreamingHttpClient, iter_commodity_day
 from app.db.models.market import MarketHistoricalFetchLog, MarketHistoricalObservation, MarketPredictability
 from app.db.upsert import upsert_ignore, upsert_preserve_columns
 from app.market.volatility import Observation, demand_change_ratio, median_and_p95, pair_observations, price_change_ratio
@@ -58,40 +59,88 @@ def ensure_days_fetched(
     dates: list[dt.date],
     client: StreamingHttpClient,
 ) -> None:
-    """Fetches only the dates not already recorded in
-    MarketHistoricalFetchLog -- including a day that produced zero
-    matching rows, which must not be mistaken for "not yet fetched" and
-    re-downloaded on every call (§5/§10 decision 1)."""
-    already_fetched = {
-        row.date
-        for row in session.query(MarketHistoricalFetchLog.date)
-        .filter_by(station_id=station_id, commodity_name=commodity_name)
-        .filter(MarketHistoricalFetchLog.date.in_(dates))
-        .all()
-    }
+    """Single-target convenience wrapper around ensure_days_fetched_batch()
+    -- kept for existing single-target callers (analyze_market()). Prefer
+    ensure_days_fetched_batch() when multiple (station_id, commodity_name)
+    targets need the same date range: calling this in a loop re-downloads
+    and re-streams each date's archive file once per target, which Phase
+    2-6E's real-data pilot found costing 35 downloads for 5 same-station
+    targets over a 7-day window where 7 would do (docs/PHASE_2_6E...v0.2
+    §14)."""
+    ensure_days_fetched_batch(session, [(station_id, commodity_name)], dates, client)
+
+
+def ensure_days_fetched_batch(
+    session: Session,
+    targets: list[tuple[int, str]],
+    dates: list[dt.date],
+    client: StreamingHttpClient,
+) -> None:
+    """Like ensure_days_fetched(), but for multiple (station_id,
+    commodity_name) targets at once. For each date, downloads and
+    streams that date's archive file AT MOST ONCE, extracting rows for
+    every target still missing from MarketHistoricalFetchLog in that
+    same pass -- rather than once per target (docs/PHASE_2_6E...v0.2
+    §14: real Model Validation data found 5 targets at the same station
+    triggering 35 redundant downloads of the same 7 days).
+
+    MarketHistoricalFetchLog's granularity is deliberately UNCHANGED
+    (station_id, commodity_name, date), not collapsed to date-only: a
+    target added in a later, separate call must still be correctly
+    (re-)scanned even if the date was already covered for other targets
+    in an earlier call -- collapsing the key would silently make a
+    genuinely new target look "already fetched" for a date it was never
+    actually extracted for. The efficiency gain comes entirely from
+    batching *within* one call across the full target list the caller
+    already knows about, not from weakening the cache key."""
     for date in dates:
-        if date in already_fetched:
+        already_fetched = {
+            (row.station_id, row.commodity_name)
+            for row in session.query(MarketHistoricalFetchLog.station_id, MarketHistoricalFetchLog.commodity_name)
+            .filter_by(date=date)
+            .all()
+        }
+        missing = [target for target in targets if target not in already_fetched]
+        if not missing:
             continue
-        rows = fetch_commodity_observations(date, station_id, commodity_name, client)
-        observation_rows = [
-            {
-                "station_id": row["station_id"],
-                "commodity_name": row["commodity_name"],
-                "sell_price": row["sell_price"],
-                "demand": row["demand"],
-                "observed_at": row["observed_at"],
-            }
-            for row in rows
-        ]
-        upsert_ignore(
-            session, MarketHistoricalObservation, observation_rows, ["station_id", "commodity_name", "observed_at"]
-        )
-        session.add(
-            MarketHistoricalFetchLog(
-                station_id=station_id, commodity_name=commodity_name, date=date,
-                fetched_at=dt.datetime.now(dt.timezone.utc),
+
+        missing_set = set(missing)
+        missing_station_ids = {station_id for station_id, _ in missing}
+        matches_by_target: dict[tuple[int, str], list[dict]] = {target: [] for target in missing}
+        for envelope in iter_commodity_day(date, client):
+            message = envelope.get("message")
+            if not isinstance(message, dict) or message.get("marketId") not in missing_station_ids:
+                continue
+            try:
+                rows = parse_commodity_message(message, received_at=dt.datetime.now(dt.timezone.utc))
+            except MalformedEddnMessage:
+                continue
+            for row in rows:
+                key = (row["station_id"], row["commodity_name"])
+                if key in missing_set:
+                    matches_by_target[key].append(row)
+
+        for target in missing:
+            station_id, commodity_name = target
+            observation_rows = [
+                {
+                    "station_id": row["station_id"],
+                    "commodity_name": row["commodity_name"],
+                    "sell_price": row["sell_price"],
+                    "demand": row["demand"],
+                    "observed_at": row["observed_at"],
+                }
+                for row in matches_by_target[target]
+            ]
+            upsert_ignore(
+                session, MarketHistoricalObservation, observation_rows, ["station_id", "commodity_name", "observed_at"]
             )
-        )
+            session.add(
+                MarketHistoricalFetchLog(
+                    station_id=station_id, commodity_name=commodity_name, date=date,
+                    fetched_at=dt.datetime.now(dt.timezone.utc),
+                )
+            )
         session.commit()
 
 
