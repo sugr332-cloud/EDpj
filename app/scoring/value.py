@@ -38,7 +38,20 @@ def _mining_sell_value(target: MiningTarget, session: Session) -> tuple[float | 
     station's market actually buys. Candidate generation already required
     at least one such (commodity, station) match with demand > 0 (see
     app/mining/candidates.py's generate_mining_sell_candidates), so this
-    re-derives the same match rather than trusting a cached figure."""
+    re-derives the same match rather than trusting a cached figure.
+
+    A held commodity's market state at this specific station is one of
+    three, and they are NOT interchangeable (edge-case review, Phase 2-3
+    follow-up): a `MarketLatest` row with `demand > 0` is a known sale
+    (counted); one with `demand == 0` is a *confirmed* "not buying this
+    right now" (excluded from the sum, but not "unknown" -- contributing
+    0 here is a fact, not a guess); no row at all means we simply haven't
+    observed whether this station buys the commodity, which is genuinely
+    unknown and must not be silently treated as either "buys it" or
+    "doesn't" -- so it blocks the whole candidate's value rather than
+    silently under-counting it. `demand < 0` cannot occur from a real
+    EDDN/journal observation and is treated the same as "unknown" rather
+    than trusted as a confirmed zero."""
     total = 0.0
     for cargo_row in session.query(CargoState).filter(CargoState.quantity > 0).all():
         if cargo_row.commodity_name not in MINABLE_COMMODITIES:
@@ -48,7 +61,9 @@ def _mining_sell_value(target: MiningTarget, session: Session) -> tuple[float | 
             .filter_by(station_id=target.station_id, commodity_name=cargo_row.commodity_name)
             .one_or_none()
         )
-        if market_row is None or market_row.demand <= 0:
+        if market_row is None or market_row.demand < 0:
+            return None, "market_data_incomplete"
+        if market_row.demand == 0:
             continue
         total += cargo_row.quantity * effective_price(market_row.sell_price, cargo_row.quantity, market_row.demand)
     return total, None
@@ -94,5 +109,12 @@ def calculate_value(draft: DraftCandidate, session: Session) -> tuple[float | No
     return None, BIO_VALUE_UNAVAILABLE_REASON  # bio_current_body / bio_next_system / bio_return
 
 
-def calculate_score(expected_value: float, action_horizon_seconds: float) -> float:
+def calculate_score(expected_value: float, action_horizon_seconds: float) -> float | None:
+    """None if `action_horizon_seconds` isn't a positive duration --
+    pipeline.py's `is_scoreable` gate already keeps this from being
+    called in that state, but this stays defensive on its own (a
+    calibrated segment landing on a 0.0-second median, however unlikely,
+    must never turn into a division by zero / infinite score)."""
+    if action_horizon_seconds <= 0:
+        return None
     return expected_value / (action_horizon_seconds / 3600)

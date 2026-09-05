@@ -272,3 +272,33 @@ class TestDesignDocRegression:
             incomplete_by_action["bio_current_body"].value_unavailable_reason
             == "species value model not implemented"
         )
+
+
+class TestNonPositiveHorizon:
+    """Edge-case review, Phase 2-3 follow-up: blocking_segments == [] only
+    means no segment is `unavailable` -- a calibrated segment landing on
+    a 0.0-second median must not turn into an infinite/undefined score."""
+
+    def test_zero_second_calibrated_horizon_stays_incomplete_even_with_a_known_value(self, db_session):
+        _mining_active_fixture(db_session)
+        db_session.add(System(system_address=1, name="Deciat", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(Station(station_id=100, system_address=1, name="Farseer Inc", station_type="Outpost",
+                                distance_to_arrival_ls=100.0, landing_pad={}, has_vista_genomics=False,
+                                is_fleet_carrier=False, source="spansh", updated_at=NOW))
+        db_session.add(MarketLatest(station_id=100, commodity_name="platinum", buy_price=0, sell_price=44586,
+                                     supply=0, demand=178, observed_at=NOW, source="eddn"))
+        db_session.add(JournalEvent(file_name="f.log", line_number=3, event_type="Loadout",
+                                     timestamp=NOW - dt.timedelta(minutes=20), payload={"CargoCapacity": 32}))
+        _calibrate(db_session, "mining_cycle", 0.0)  # degenerate: two samples with an identical timestamp
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state())
+
+        assert result.complete == []
+        mining_continue = [c for c in result.incomplete if c.action == "mining_continue"]
+        assert len(mining_continue) == 1
+        candidate = mining_continue[0]
+        assert candidate.blocking_segments == []  # no segment reports "unavailable"
+        assert candidate.expected_value == 44586.0  # Value was calculable
+        assert candidate.value_unavailable_reason is None
+        assert "positive duration" in candidate.reason

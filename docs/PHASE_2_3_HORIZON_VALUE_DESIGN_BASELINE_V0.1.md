@@ -1,7 +1,7 @@
 # EDpj Phase 2-3 Horizon / Value Design Baseline
 
-**Version:** 0.4
-**Status:** Implemented（Baseline Fixed後、実装完了。既存181テスト+新規23テスト、計204テスト全通過。Exit Criteria全項目達成）
+**Version:** 0.5
+**Status:** Implemented（v0.4実装完了後、Edge Caseレビューにより2点を追記——Mining Sellの市場3状態分類、is_scoreable/calculate_scoreのゼロ除算防御。既存181テスト+新規34テスト、計215テスト全通過）
 **Date:** 2026-09-05
 **Depends on:** `IMPLEMENTATION_SPEC_V0.2.md` §10/§11/§12, `docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md`, `docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md`
 
@@ -42,15 +42,24 @@ class IncompleteCandidate:
 Score計算に進めてよいかどうかの判定（Score対象判定, `is_scoreable()`）を以下に明示する。**この判定はPhase 2-3の責務であり、Recommendation/alternatives選定（Phase 2-4のRanking）とは別物である**——ここで「昇格」しても、複数のScore対象からどれをRecommendationとして選ぶかはPhase 2-4が決める。
 
 ```python
-def is_scoreable(candidate: IncompleteCandidate) -> bool:
+def is_scoreable(
+    blocking_segments: list[str],
+    expected_value: float | None,
+    value_unavailable_reason: str | None,
+    action_horizon_seconds: float | None,
+) -> bool:
     return (
-        candidate.blocking_segments == []
-        and candidate.expected_value is not None
-        and candidate.value_unavailable_reason is None
+        blocking_segments == []
+        and expected_value is not None
+        and value_unavailable_reason is None
+        and action_horizon_seconds is not None
+        and action_horizon_seconds > 0
     )
 ```
 
 3つ目の条件は論理的には2つ目と対になる（`expected_value is not None`であれば通常`value_unavailable_reason is None`のはず）が、**2軸モデルとの対応を明示するため冗長でも両方チェックする**。いずれか一つでも欠けていれば`IncompleteCandidate`のまま保持する。`expected_value`が計算できているのに`blocking_segments`が残っているケース（例: `mining_sell`）では、**expected_valueを保持しておく**ことで、将来SCモデルが入った時にValue再計算が不要になる。
+
+**Edge Caseレビューでの追加確定: `action_horizon_seconds > 0`も条件に含める。** `blocking_segments == []`は「unavailableなsegmentが1つもない」ことしか意味せず、「合計秒数が正の実用可能な値である」ことは保証しない。Calibration Engineが極端なデータ（例: 連続する2イベントが同一秒タイムスタンプ）から`median duration = 0.0`を算出した場合、この条件がなければ`calculate_score`が0除算/無限大スコアを返してしまう。`calculate_score()`自身にも同じガードを二重に入れる（`action_horizon_seconds <= 0`なら`None`を返す）——`is_scoreable`が正常経路を保証し、`calculate_score`は万一直接呼ばれた場合の最終防御とする。
 
 ## 2. 現時点で判明している6 Actionの実現可能性（重要）
 
@@ -96,13 +105,26 @@ effective_price = listed_price × penalty
 
 `app/mining/price.py`として実装。`MiningTarget.demand`/`cargo_demand_ratio`/`listed_price`/`effective_price`（Phase 2-2でNoneのまま残していたフィールド）をここで埋める。
 
-### 4.2 Mining Sell value（§10.2、実装可能）
+### 4.2 Mining Sell value（§10.2、実装可能。Edge Caseレビューで市場状態を3分類に修正）
 
 ```text
 value = Σ(quantity × effective_price)  # 保有commodityごとの合計
 ```
 
-`quantity`はCargoState、`effective_price`は4.1節。candidate生成時点で既にmarket dataが必須条件になっているため、value計算に必要な入力は既に揃っている。
+`quantity`はCargoState、`effective_price`は4.1節。candidate生成時点で既にmarket dataが必須条件になっているため、value計算に必要な入力は基本的に揃っている。
+
+**Edge Caseレビューでの追加確定: 保有commodityごとに、対象StationのMarketLatestは3状態あり、これらを同一視しない。**
+
+```text
+row あり + demand > 0   → 既知の売却先。effective_priceを計算して加算する
+row あり + demand == 0  → 「今は買っていない」という確定した観測事実。加算対象から除外する（0を加算するのではなく、単にこのcommodityを合計に含めない）
+row なし                → そのStationがこのcommodityを買うか買わないか、観測できておらず不明
+demand < 0              → 実データでは起こり得ない不正な値。rowなしと同様「不明」として扱う
+```
+
+`row なし`（および不正なdemand）は、Mining Continueのcargo capacity unknown/種価値モデル未実装と同種の「本当にわからない」状態であり、**候補全体のValueをunavailableにする**（`value_unavailable_reason = "market_data_incomplete"`）。一方`demand == 0`は「わからない」のではなく「買わないと確定している」ため、そのcommodity分だけ0円として扱ってよく、他の保有commodityの計算には影響しない。
+
+これはBのように候補全体を機械的に無効化するわけではない——同一station候補内で「確定した除外」と「未知」を区別し、未知が1つでもあれば初めてvalue全体をunavailableにする、という2段階の判定である。
 
 ### 4.3 Mining Continue value（§10.3、実装直前の実データ検証で全面修正）
 
@@ -212,7 +234,7 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 ## 8. Phase 2-3 Exit Criteria
 
 - [x] `IncompleteCandidate`が`blocking_segments`/`value_unavailable_reason`の2軸で「不完全」を表現できる（用語は`value_calculable`で統一）
-- [x] Score対象判定条件（`is_scoreable()`: `blocking_segments == [] AND expected_value is not None AND value_unavailable_reason is None`）が実装されている（`app/scoring/models.py`）
+- [x] Score対象判定条件（`is_scoreable()`: `blocking_segments == [] AND expected_value is not None AND value_unavailable_reason is None AND action_horizon_seconds > 0`）が実装されている（`app/scoring/models.py`）
 - [x] Mining Sellのeffective price/valueが実装され、テストで検証されている（`app/mining/price.py`, `app/scoring/value.py`, `tests/integration/test_candidate_pipeline.py`）
 - [x] `app/mining/yield_model.py`が`expected_mined_quantity=1.0`を確定値として扱い（統計モデルを持ち込まない）テストされている
 - [x] `app/mining/cargo_capacity.py`が最新`Loadout`イベントの`CargoCapacity`を返し、`Loadout`未記録時のみ`None`（`cargo_capacity_unknown`）を返すことがテストされている
@@ -221,9 +243,11 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 - [x] Bio 3種（current_body/next_system/return）すべてが`value_unavailable_reason="species value model not implemented"`で一貫していることがテストされている
 - [x] `mining_sell`が「expected_valueは分かるがhorizonが不明」という状態でIncompleteCandidateとして保持され、値が失われないことがテストされている
 - [x] `calculate_score()`（`expected_value / horizon_hours`）は実装するが、`rank_candidates`/`select_recommendation`/`build_alternatives`はPhase 2-4へ持ち越し、実装しない（`app/scoring/value.py`にrank/select/build系関数は一切存在しない）
-- [x] 既存181テストに回帰がない（181 → 204、新規23件はすべてPhase 2-3のValue関連）
+- [x] Mining Sellが市場を3状態（`demand>0`=既知の売却先／`demand==0`=確定した非売却／rowなし=不明）で扱い、rowなし（または不正な負のdemand）が1つでもあれば候補全体が`value_unavailable_reason="market_data_incomplete"`になることがテストされている
+- [x] `calculate_score()`/`is_scoreable()`が`action_horizon_seconds <= 0`を安全に扱い、0除算/無限大スコアを発生させないことがテストされている
+- [x] 既存181テストに回帰がない（181 → 215、新規34件はすべてPhase 2-3のValue関連）
 
-## 9. 決定事項サマリ（レビュー2巡目で確定）
+## 9. 決定事項サマリ（レビュー2巡目で確定、Edge Caseレビューで2点追記）
 
 1. **cargo capacity不明時**: 保守的近似はしない。`value_unavailable_reason="cargo_capacity_unknown"`
 2. **Mining Start value**: Phase 2-3では実装しない。独立した「Mining Start Value Model」として将来設計する
@@ -233,5 +257,7 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 6. **（同上）Mining Continueのcommodity**: `mining_active`判定に使われた直近`MiningRefined.Type`をそのまま使う（候補生成時点で「現在のセッションに属する」ことは既に保証されている）
 7. **（同上）Mining Continueのcargo capacity**: `journal_events`の最新`Loadout`イベントの`CargoCapacity`から取得可能（Loadout解析という新機能は不要、既存のverbatim保存アーキテクチャで既に取得できる）
 8. **（同上）Mining Continueの売却市場**: 対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件を、移動を伴わない評価専用の仮想売却先として決定論的に選ぶ。該当なしなら`value_unavailable_reason="no_market_target"`
+9. **（Edge Caseレビューで追加）Mining Sellの市場3状態分類**: `demand>0`（既知・加算）／`demand==0`（確定した非売却・除外するが候補全体は無効化しない）／rowなしまたは負のdemand（不明・候補全体を`value_unavailable_reason="market_data_incomplete"`にする）を区別する。「わかっている0」と「わからない」を混同しない
+10. **（同上）Scoreのゼロ除算防御**: `is_scoreable()`に`action_horizon_seconds > 0`を追加し、`calculate_score()`自身にも同じガードを二重に入れる。Calibration Engine側の根本原因（`duration_seconds=0`のサンプル除外）はPhase 0-B/2-1の既存コードに触れるスコープの異なる変更のため、今回は対象としない
 
-この4点の確定と、`value_calculable`への用語統一・Score対象判定条件（`is_scoreable()`）の明示（1節）をもって、本書はPhase 2-3実装のBaselineとして確定する。
+この10点の確定と、`value_calculable`への用語統一・Score対象判定条件（`is_scoreable()`）の明示（1節）をもって、本書はPhase 2-3実装のBaselineとして確定する。

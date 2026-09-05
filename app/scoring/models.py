@@ -159,18 +159,31 @@ class IncompleteCandidate:
 
 
 def is_scoreable(
-    blocking_segments: list[str], expected_value: float | None, value_unavailable_reason: str | None
+    blocking_segments: list[str],
+    expected_value: float | None,
+    value_unavailable_reason: str | None,
+    action_horizon_seconds: float | None,
 ) -> bool:
     """docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §1/§7: Phase
-    2-3's Score-eligibility check, evaluated on the raw three inputs
-    (rather than an already-built IncompleteCandidate) so the pipeline
-    can decide which DTO to build -- ActionCandidate or
-    IncompleteCandidate -- from the result, instead of constructing one
-    to find out it should have been the other. Deliberately not named
-    anything Recommendation-shaped -- selecting a winner among scoreable
-    candidates is Phase 2-4's `rank_candidates`/`select_recommendation`,
-    not this function's job."""
-    return blocking_segments == [] and expected_value is not None and value_unavailable_reason is None
+    2-3's Score-eligibility check, evaluated on the raw inputs (rather
+    than an already-built IncompleteCandidate) so the pipeline can decide
+    which DTO to build -- ActionCandidate or IncompleteCandidate -- from
+    the result, instead of constructing one to find out it should have
+    been the other. Deliberately not named anything Recommendation-shaped
+    -- selecting a winner among scoreable candidates is Phase 2-4's
+    `rank_candidates`/`select_recommendation`, not this function's job.
+
+    `action_horizon_seconds > 0` (edge-case review, Phase 2-3 follow-up)
+    guards against a calibrated segment summing to a non-positive
+    duration -- `blocking_segments == []` only means no segment is
+    `unavailable`, not that the total is a usable positive number."""
+    return (
+        blocking_segments == []
+        and expected_value is not None
+        and value_unavailable_reason is None
+        and action_horizon_seconds is not None
+        and action_horizon_seconds > 0
+    )
 
 
 def build_horizon(

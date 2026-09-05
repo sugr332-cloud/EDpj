@@ -70,7 +70,7 @@ def generate_and_classify(
         blocking = _blocking_segments(components)
         expected_value, value_unavailable_reason = calculate_value(draft, session)
 
-        if is_scoreable(blocking, expected_value, value_unavailable_reason):
+        if is_scoreable(blocking, expected_value, value_unavailable_reason, total_seconds):
             complete.append(
                 ActionCandidate(
                     action=draft.action,
@@ -88,6 +88,8 @@ def generate_and_classify(
             reasons = []
             if blocking:
                 reasons.append(f"{'/'.join(blocking)} time estimate unavailable")
+            elif total_seconds is None or total_seconds <= 0:
+                reasons.append(f"action horizon is not a positive duration ({total_seconds}s)")
             if value_unavailable_reason:
                 reasons.append(f"value unavailable: {value_unavailable_reason}")
             incomplete.append(

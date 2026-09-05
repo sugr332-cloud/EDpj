@@ -59,6 +59,7 @@ def test_recent_mining_refined_with_body_context(db_session):
     assert context.last_ring_body_id == 5
     assert context.last_ring_system_address == 123
     assert context.generation_confidence == 1.0
+    assert context.last_refined_commodity == "platinum"  # normalized from "$platinum_name;"
 
 
 def test_recent_mining_refined_without_body_context_lowers_confidence(db_session):
@@ -77,6 +78,7 @@ def test_mining_refined_outside_lookback_window_is_not_active(db_session):
 
     context = detect_mining_context(db_session, lookback=dt.timedelta(minutes=15))
     assert context.mining_active is False
+    assert context.last_refined_commodity is None  # stale-only history is not "currently mining X" either
 
 
 def test_body_context_after_mining_refined_is_not_used(db_session):
