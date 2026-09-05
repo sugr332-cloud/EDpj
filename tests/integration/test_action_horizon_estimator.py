@@ -4,43 +4,43 @@ import datetime as dt
 
 import pytest
 
-from app.db.models.timing import TimingSample
-from app.routing.time import MEASURED_CONFIDENCE, MEASURED_SAMPLE_THRESHOLD, estimate_segment
+from app.db.models.calibration import CalibrationModel
+from app.routing.time import ESTIMATED_CONFIDENCE, estimate_segment
 from app.scoring.models import ActionCandidate, build_horizon
 
-BASE = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
 
-def _insert_samples(session, segment_type: str, durations: list[float]) -> None:
-    for i, duration in enumerate(durations):
-        start = BASE + dt.timedelta(seconds=i * 1000)
-        end = start + dt.timedelta(seconds=duration)
-        session.add(
-            TimingSample(
-                segment_type=segment_type,
-                start_file_name="fixture.log",
-                start_line_number=i * 2 + 1,
-                end_file_name="fixture.log",
-                end_line_number=i * 2 + 2,
-                start_time=start,
-                end_time=end,
-                duration_seconds=duration,
-                arrival_dist_from_star_ls=None,
-                reached_known_target=False,
-                extra={},
-            )
+def _insert_calibration(
+    session,
+    segment_type: str,
+    seconds: float,
+    sample_count_fit: int = 20,
+    sample_count_eval: int = 5,
+    validation_status: str = "pass",
+) -> None:
+    session.add(
+        CalibrationModel(
+            segment_type=segment_type,
+            seconds=seconds,
+            sample_count_fit=sample_count_fit,
+            sample_count_eval=sample_count_eval,
+            median_absolute_error=0.0 if validation_status == "pass" else 0.9,
+            median_signed_error=0.0 if validation_status == "pass" else 0.9,
+            r_squared=1.0,
+            validation_status=validation_status,
+            fitted_at=NOW,
         )
+    )
     session.commit()
 
 
 class TestEstimateSegmentSupercruise:
-    def test_supercruise_is_always_unavailable_even_with_ample_telemetry(self, db_session):
-        _insert_samples(db_session, "supercruise", [float(x) for x in range(10, 60)])  # 50 samples
-
-        # Phase 0-B storage must still work — the override is in
-        # estimate_segment(), not in whether telemetry gets recorded.
-        stored = db_session.query(TimingSample).filter_by(segment_type="supercruise").count()
-        assert stored == 50
+    def test_supercruise_is_always_unavailable_even_with_a_calibration_row(self, db_session):
+        # supercruise is never calibrated by app/calibration/engine.py, but
+        # even if a row somehow existed, estimate_segment must ignore it —
+        # the segment_type=="supercruise" check runs before any query.
+        _insert_calibration(db_session, "supercruise", seconds=180.0)
 
         result = estimate_segment("supercruise", None, db_session)
         assert result.status == "unavailable"
@@ -48,7 +48,7 @@ class TestEstimateSegmentSupercruise:
         assert result.confidence is None
         assert result.basis  # explains why, not just that
 
-    def test_supercruise_unavailable_even_with_zero_telemetry(self, db_session):
+    def test_supercruise_unavailable_with_no_calibration_row(self, db_session):
         result = estimate_segment("supercruise", None, db_session)
         assert result.status == "unavailable"
         assert result.seconds is None
@@ -56,48 +56,61 @@ class TestEstimateSegmentSupercruise:
 
 
 class TestEstimateSegmentOtherSegments:
-    def test_zero_samples_is_unavailable(self, db_session):
+    def test_no_calibration_row_is_unavailable(self, db_session):
         result = estimate_segment("dock", None, db_session)
         assert result.status == "unavailable"
         assert result.seconds is None
         assert result.confidence is None
 
-    def test_dock_with_ample_samples_is_measured(self, db_session):
-        _insert_samples(db_session, "dock", [10.0, 12.0, 11.0, 9.0, 13.0] * 5)  # 25 samples
+    def test_calibrated_and_validated_segment_is_estimated_not_measured(self, db_session):
+        _insert_calibration(db_session, "dock", seconds=11.0, sample_count_fit=25, validation_status="pass")
 
         result = estimate_segment("dock", None, db_session)
-        assert result.status == "measured"
+        # Sample count alone never promotes a calibrated value to
+        # "measured" — see app/routing/time.py's module docstring.
+        assert result.status == "estimated"
         assert result.seconds == pytest.approx(11.0)
-        assert result.confidence == MEASURED_CONFIDENCE
-        assert "sample_count=25" in result.basis
+        assert result.confidence == ESTIMATED_CONFIDENCE
+        assert "fit=25" in result.basis
+        assert "validation=pass" in result.basis
 
-    def test_mining_cycle_with_sparse_samples_is_estimated(self, db_session):
-        _insert_samples(db_session, "mining_cycle", [100.0, 120.0, 110.0])  # 3 samples
+    def test_calibrated_but_failed_validation_is_still_estimated(self, db_session):
+        # Per review: sample count/validation failure is diagnostic
+        # metadata, not a status/confidence downgrade in Phase 2-1.
+        _insert_calibration(db_session, "mining_cycle", seconds=110.0, validation_status="fail")
 
         result = estimate_segment("mining_cycle", None, db_session)
         assert result.status == "estimated"
-        assert result.seconds == pytest.approx(110.0)
-        assert result.confidence is not None
-        assert result.confidence < MEASURED_CONFIDENCE
+        assert result.confidence == ESTIMATED_CONFIDENCE
+        assert "validation=fail" in result.basis
+
+    def test_calibrated_with_zero_eval_samples_is_unavailable(self, db_session):
+        _insert_calibration(db_session, "ascent", seconds=40.0, sample_count_fit=10, sample_count_eval=0, validation_status="insufficient")
+
+        result = estimate_segment("ascent", None, db_session)
+        assert result.status == "unavailable"
+        assert result.seconds is None
+        assert result.confidence is None
+        assert "fit=10" in result.basis
 
 
 class TestHorizonComplete:
     def test_action_requiring_supercruise_is_incomplete(self, db_session):
-        _insert_samples(db_session, "dock", [10.0] * MEASURED_SAMPLE_THRESHOLD)
+        _insert_calibration(db_session, "dock", seconds=10.0)
 
         components, complete, total = build_horizon(["dock", "supercruise"], db_session)
 
-        assert components["dock"].status == "measured"
+        assert components["dock"].status == "estimated"
         assert components["supercruise"].status == "unavailable"
         assert complete is False
         assert total is None
 
     def test_action_not_requiring_supercruise_can_be_complete(self, db_session):
-        _insert_samples(db_session, "descent", [30.0] * MEASURED_SAMPLE_THRESHOLD)
-        _insert_samples(db_session, "bio_sample", [60.0] * MEASURED_SAMPLE_THRESHOLD)
+        _insert_calibration(db_session, "descent", seconds=30.0)
+        _insert_calibration(db_session, "bio_sample", seconds=60.0)
         # Supercruise telemetry exists but this action doesn't require it —
         # horizon_complete must not be dragged down by an unrelated segment.
-        _insert_samples(db_session, "supercruise", [200.0] * MEASURED_SAMPLE_THRESHOLD)
+        _insert_calibration(db_session, "supercruise", seconds=200.0)  # never actually consulted
 
         components, complete, total = build_horizon(["descent", "bio_sample"], db_session)
 
@@ -106,7 +119,7 @@ class TestHorizonComplete:
         assert total == pytest.approx(90.0)
 
     def test_action_candidate_reflects_incomplete_horizon(self, db_session):
-        _insert_samples(db_session, "dock", [10.0] * MEASURED_SAMPLE_THRESHOLD)
+        _insert_calibration(db_session, "dock", seconds=10.0)
         components, complete, total = build_horizon(["dock", "supercruise"], db_session)
 
         candidate = ActionCandidate(
@@ -126,8 +139,8 @@ class TestHorizonComplete:
         assert candidate.score_per_hour is None
 
     def test_action_candidate_reflects_complete_horizon(self, db_session):
-        _insert_samples(db_session, "descent", [30.0] * MEASURED_SAMPLE_THRESHOLD)
-        _insert_samples(db_session, "bio_sample", [60.0] * MEASURED_SAMPLE_THRESHOLD)
+        _insert_calibration(db_session, "descent", seconds=30.0)
+        _insert_calibration(db_session, "bio_sample", seconds=60.0)
         components, complete, total = build_horizon(["descent", "bio_sample"], db_session)
 
         candidate = ActionCandidate(
@@ -138,7 +151,7 @@ class TestHorizonComplete:
             horizon_components=components,
             horizon_complete=complete,
             score_per_hour=500_000.0 / (total / 3600),
-            confidence=MEASURED_CONFIDENCE,
+            confidence=ESTIMATED_CONFIDENCE,
             reason="fixture: bio_current_body needs no supercruise leg",
         )
 

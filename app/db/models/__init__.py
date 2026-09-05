@@ -1,3 +1,4 @@
+from app.db.models.calibration import CalibrationModel
 from app.db.models.eddn import BodyBioSignal, EddnJournalObservation
 from app.db.models.journal import JournalEvent
 from app.db.models.market import MarketLatest, MarketSnapshot, StationActivity
@@ -20,4 +21,5 @@ __all__ = [
     "Commodity",
     "EddnJournalObservation",
     "BodyBioSignal",
+    "CalibrationModel",
 ]
