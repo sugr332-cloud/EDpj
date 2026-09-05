@@ -1,7 +1,7 @@
 # EDpj Phase 2-5A Market Predictability Implementation Baseline
 
 **Version:** 0.2
-**Status:** Design Baseline Fixed（レビューで§5/§9/§7の3点を確定: 観測キャッシュ採用、既定window=14日、demand volatilityは診断情報のみで一次分類には使わない）
+**Status:** Implemented（app/collectors/eddn_archive.py, app/market/volatility.py, app/market/predictability.py実装完了。既存233テスト+新規27テスト、計260テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Depends on:** `docs/MARKET_PREDICTABILITY_SPEC_V0.1.md` (§3.3で取得戦略を確定済み), `app/collectors/eddn.py`（`parse_commodity_message`を再利用）
 
@@ -245,17 +245,17 @@ def get_predictability(
 
 ## 9. Exit Criteria
 
-- [ ] `app/collectors/eddn_archive.py`が実archiveから1日分を取得・展開・フィルタでき、`app/collectors/eddn.py`の`parse_commodity_message`を再利用している（schemaパースを二重実装していない）
-- [ ] 存在しない日付（404）がエラーではなく0件として扱われる
-- [ ] `pair_observations`が`max_gap`超過ペアをvolatility計算から除外しつつ、gap統計自体には含めることがテストされている
-- [ ] price=0/demand境界（floor）が0除算を起こさないことがテストされている
-- [ ] `sample_count`不足時に`INSUFFICIENT`になり、`STABLE`と混同されないことがテストされている
-- [ ] `MarketPredictability`が`commodity_name`（`commodity_id`ではない）で`MarketLatest`と同じキー体系になっている
-- [ ] 分類閾値がnamed constantとして明示され、コード上に「暫定値、Phase 2-6で再較正」と明記されている
-- [ ] `classify()`がdemand volatilityを一切参照せず、price volatilityのみで判定していることがテストされている
-- [ ] `MarketHistoricalFetchLog`により、0件だった日が「未取得」として毎回再取得されないことがテストされている
-- [ ] `DEFAULT_ANALYSIS_WINDOW_DAYS=14`がnamed constantとして明示され、コード上に「運用上の初期値であり統計的最適値ではない」と明記されている
-- [ ] 既存233テストに回帰がない
+- [x] `app/collectors/eddn_archive.py`が実archiveから1日分を取得・展開・フィルタでき、`app/collectors/eddn.py`の`parse_commodity_message`を再利用している（schemaパースを二重実装していない）
+- [x] 存在しない日付（404）がエラーではなく0件として扱われる
+- [x] `pair_observations`が`max_gap`超過ペアをvolatility計算から除外しつつ、gap統計自体には含めることがテストされている
+- [x] price=0/demand境界（floor）が0除算を起こさないことがテストされている
+- [x] `sample_count`不足時に`INSUFFICIENT`になり、`STABLE`と混同されないことがテストされている
+- [x] `MarketPredictability`が`commodity_name`（`commodity_id`ではない）で`MarketLatest`と同じキー体系になっている
+- [x] 分類閾値がnamed constantとして明示され、コード上に「暫定値、Phase 2-6で再較正」と明記されている
+- [x] `classify()`がdemand volatilityを一切参照せず、price volatilityのみで判定していることがテストされている
+- [x] `MarketHistoricalFetchLog`により、0件だった日が「未取得」として毎回再取得されないことがテストされている
+- [x] `DEFAULT_ANALYSIS_WINDOW_DAYS=14`がnamed constantとして明示され、コード上に「運用上の初期値であり統計的最適値ではない」と明記されている
+- [x] 既存233テストに回帰がない（233 → 260、新規27件はすべてPhase 2-5A関連）
 
 ## 10. 決定事項サマリ（レビューで確定）
 
