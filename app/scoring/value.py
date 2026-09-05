@@ -1,6 +1,7 @@
-"""Value / Score calculation — Phase 2-3.
+"""Value / Score calculation — Phase 2-3/2-5C.
 
-Spec (docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §4/§5/§7, v0.4).
+Spec (docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §4/§5/§7, v0.4;
+docs/PHASE_2_5_CONFIDENCE_EXPLAINABILITY_DESIGN_BASELINE_V0.1.md §7.2, v0.2).
 
 `calculate_value` is attempted for every passed candidate regardless of
 horizon completeness (§0/§6) -- it never consults `blocking_segments`.
@@ -10,12 +11,22 @@ Only `mining_sell`/`mining_continue` can currently return a value;
 deliberately out of scope for Phase 2-3 (§4.4/§5), not because of any
 missing per-candidate data.
 
+`calculate_value` returns a `ValueResult` (not a bare tuple) so it can
+also report which `MarketLatest.observed_at` values actually contributed
+to `expected_value` -- Confidence (app/scoring/confidence.py) needs this
+for its freshness factor, and must never re-derive "which market row was
+used" independently, since that would duplicate Value's own selection
+logic and risk silently diverging from it if that logic ever changes.
+
 `calculate_score`/`is_scoreable`/`calculate_value` are Phase 2-3's whole
 responsibility here -- ranking multiple scoreable candidates against each
 other (`rank_candidates`/`select_recommendation`/`build_alternatives`) is
 explicitly Phase 2-4 (§7) and does not belong in this module.
 """
 from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
@@ -33,7 +44,19 @@ MINING_START_VALUE_UNAVAILABLE_REASON = (
 BIO_VALUE_UNAVAILABLE_REASON = "species value model not implemented"
 
 
-def _mining_sell_value(target: MiningTarget, session: Session) -> tuple[float | None, str | None]:
+@dataclass(frozen=True)
+class ValueResult:
+    """`market_observed_ats` is empty whenever the candidate's value
+    didn't depend on any Market observation at all (mining_start/bio_* --
+    always `value_unavailable_reason`-only) -- not just when it's
+    unavailable for a market-related reason."""
+
+    expected_value: float | None
+    value_unavailable_reason: str | None
+    market_observed_ats: list[dt.datetime] = field(default_factory=list)
+
+
+def _mining_sell_value(target: MiningTarget, session: Session) -> ValueResult:
     """§4.2: value = Σ(quantity × effective_price) over held ore that this
     station's market actually buys. Candidate generation already required
     at least one such (commodity, station) match with demand > 0 (see
@@ -53,6 +76,7 @@ def _mining_sell_value(target: MiningTarget, session: Session) -> tuple[float | 
     EDDN/journal observation and is treated the same as "unknown" rather
     than trusted as a confirmed zero."""
     total = 0.0
+    observed_ats: list[dt.datetime] = []
     for cargo_row in session.query(CargoState).filter(CargoState.quantity > 0).all():
         if cargo_row.commodity_name not in MINABLE_COMMODITIES:
             continue
@@ -62,14 +86,15 @@ def _mining_sell_value(target: MiningTarget, session: Session) -> tuple[float | 
             .one_or_none()
         )
         if market_row is None or market_row.demand < 0:
-            return None, "market_data_incomplete"
+            return ValueResult(None, "market_data_incomplete")
         if market_row.demand == 0:
             continue
         total += cargo_row.quantity * effective_price(market_row.sell_price, cargo_row.quantity, market_row.demand)
-    return total, None
+        observed_ats.append(market_row.observed_at)
+    return ValueResult(total, None, observed_ats)
 
 
-def _mining_continue_value(target: MiningTarget, session: Session) -> tuple[float | None, str | None]:
+def _mining_continue_value(target: MiningTarget, session: Session) -> ValueResult:
     """§4.3 (v0.4): quantity is the fixed 1t/event constant, commodity is
     whichever `MiningRefined.Type` candidate generation already resolved
     onto the target, cargo capacity comes from the latest `Loadout`
@@ -78,7 +103,7 @@ def _mining_continue_value(target: MiningTarget, session: Session) -> tuple[floa
     assumption only, no travel time is added for it."""
     cargo_capacity = get_cargo_capacity(session)
     if cargo_capacity is None:
-        return None, "cargo_capacity_unknown"
+        return ValueResult(None, "cargo_capacity_unknown")
 
     market_rows = (
         session.query(MarketLatest)
@@ -86,27 +111,28 @@ def _mining_continue_value(target: MiningTarget, session: Session) -> tuple[floa
         .all()
     )
     if not market_rows:
-        return None, "no_market_target"
+        return ValueResult(None, "no_market_target")
 
     current_cargo = sum(row.quantity for row in session.query(CargoState).all())
     evaluation_cargo = min(current_cargo + EXPECTED_REFINED_QUANTITY_PER_EVENT, cargo_capacity)
-    best_effective_price = max(
-        effective_price(row.sell_price, evaluation_cargo, row.demand) for row in market_rows
+    best_row = max(market_rows, key=lambda row: effective_price(row.sell_price, evaluation_cargo, row.demand))
+    best_effective_price = effective_price(best_row.sell_price, evaluation_cargo, best_row.demand)
+    return ValueResult(
+        EXPECTED_REFINED_QUANTITY_PER_EVENT * best_effective_price, None, [best_row.observed_at]
     )
-    return EXPECTED_REFINED_QUANTITY_PER_EVENT * best_effective_price, None
 
 
-def calculate_value(draft: DraftCandidate, session: Session) -> tuple[float | None, str | None]:
-    """Returns (expected_value, value_unavailable_reason) -- exactly one
-    of the two is None on any return, matching IncompleteCandidate's/
-    is_scoreable's contract."""
+def calculate_value(draft: DraftCandidate, session: Session) -> ValueResult:
+    """Exactly one of `expected_value`/`value_unavailable_reason` is None
+    on any return, matching IncompleteCandidate's/is_scoreable's
+    contract."""
     if draft.action == "mining_sell":
         return _mining_sell_value(draft.target, session)
     if draft.action == "mining_continue":
         return _mining_continue_value(draft.target, session)
     if draft.action == "mining_start":
-        return None, MINING_START_VALUE_UNAVAILABLE_REASON
-    return None, BIO_VALUE_UNAVAILABLE_REASON  # bio_current_body / bio_next_system / bio_return
+        return ValueResult(None, MINING_START_VALUE_UNAVAILABLE_REASON)
+    return ValueResult(None, BIO_VALUE_UNAVAILABLE_REASON)  # bio_current_body / bio_next_system / bio_return
 
 
 def calculate_score(expected_value: float, action_horizon_seconds: float) -> float | None:

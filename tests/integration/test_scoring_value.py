@@ -41,9 +41,11 @@ class TestMiningStartAndBioValueDeferred:
         draft = DraftCandidate(
             action="mining_start", target=_mining_target(), required_segments=["jump", "supercruise", "mining_cycle"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert value is None
         assert reason == MINING_START_VALUE_UNAVAILABLE_REASON
+        assert result.market_observed_ats == []  # no Market observation was ever consulted
 
     def test_bio_current_body_and_bio_next_system_value_is_always_unavailable(self, db_session):
         for action, segments in [
@@ -51,7 +53,8 @@ class TestMiningStartAndBioValueDeferred:
             ("bio_next_system", ["jump", "supercruise", "descent", "bio_sample", "ascent"]),
         ]:
             draft = DraftCandidate(action=action, target=_bio_target(), required_segments=segments)
-            value, reason = calculate_value(draft, db_session)
+            result = calculate_value(draft, db_session)
+            value, reason = result.expected_value, result.value_unavailable_reason
             assert value is None
             assert reason == BIO_VALUE_UNAVAILABLE_REASON
 
@@ -59,7 +62,8 @@ class TestMiningStartAndBioValueDeferred:
         draft = DraftCandidate(
             action="bio_return", target=_mining_target(), required_segments=["jump", "supercruise", "dock"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert value is None
         assert reason == BIO_VALUE_UNAVAILABLE_REASON
 
@@ -74,7 +78,8 @@ class TestMiningContinueValueEdgeCases:
         draft = DraftCandidate(
             action="mining_continue", target=_mining_target(commodity_name="platinum"), required_segments=["mining_cycle"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert value is None
         assert reason == "no_market_target"
 
@@ -97,9 +102,13 @@ class TestMiningContinueValueEdgeCases:
         draft = DraftCandidate(
             action="mining_continue", target=_mining_target(commodity_name="platinum"), required_segments=["mining_cycle"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert reason is None
         assert value == 90000.0
+        # SQLite doesn't round-trip tzinfo on DateTime(timezone=True) columns
+        # (same project-wide quirk as elsewhere) -- compare naive values.
+        assert [ts.replace(tzinfo=None) for ts in result.market_observed_ats] == [NOW.replace(tzinfo=None)]
 
 
 class TestMiningSellMultiCommodity:
@@ -124,9 +133,11 @@ class TestMiningSellMultiCommodity:
         draft = DraftCandidate(
             action="mining_sell", target=_mining_target(station_id=100), required_segments=["jump", "supercruise", "dock"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert reason is None
         assert value == 10 * 44586.0 + 5 * 44586.0
+        assert len(result.market_observed_ats) == 2  # both commodities' market rows contributed
 
     def test_confirmed_zero_demand_commodity_is_excluded_but_others_still_count(self, db_session):
         db_session.add(CargoState(commodity_name="platinum", quantity=10, updated_at=NOW))
@@ -145,7 +156,8 @@ class TestMiningSellMultiCommodity:
         draft = DraftCandidate(
             action="mining_sell", target=_mining_target(station_id=100), required_segments=["jump", "supercruise", "dock"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert reason is None
         assert value == 10 * 44586.0  # painite confirmed unsellable here right now, contributes 0 -- not unknown
 
@@ -162,7 +174,8 @@ class TestMiningSellMultiCommodity:
         draft = DraftCandidate(
             action="mining_sell", target=_mining_target(station_id=100), required_segments=["jump", "supercruise", "dock"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert value is None
         assert reason == "market_data_incomplete"
 
@@ -177,7 +190,8 @@ class TestMiningSellMultiCommodity:
         draft = DraftCandidate(
             action="mining_sell", target=_mining_target(station_id=100), required_segments=["jump", "supercruise", "dock"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert value is None
         assert reason == "market_data_incomplete"
 
@@ -201,7 +215,8 @@ class TestMiningContinueCargoHeadroom:
         draft = DraftCandidate(
             action="mining_continue", target=_mining_target(commodity_name="platinum"), required_segments=["mining_cycle"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert reason is None
         # evaluation_cargo = min(5+1, 5) = 5 -> r = 5/20 = 0.25 (boundary, no penalty)
         assert value == pytest.approx(44586.0)
@@ -220,7 +235,8 @@ class TestMiningContinueCargoHeadroom:
         draft = DraftCandidate(
             action="mining_continue", target=_mining_target(commodity_name="platinum"), required_segments=["mining_cycle"]
         )
-        value, reason = calculate_value(draft, db_session)
+        result = calculate_value(draft, db_session)
+        value, reason = result.expected_value, result.value_unavailable_reason
         assert reason is None
         # evaluation_cargo = min(5+1, 100) = 6 -> r = 6/20 = 0.3 -> some penalty
         assert value == pytest.approx(44586.0 * 0.95)

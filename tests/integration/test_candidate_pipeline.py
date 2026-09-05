@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from app.db.models.calibration import CalibrationModel
 from app.db.models.eddn import BodyBioSignal
 from app.db.models.journal import JournalEvent
@@ -68,6 +70,9 @@ class TestCompleteCandidates:
         assert candidate.action_horizon_seconds == 120.0
         assert candidate.expected_value == 44586.0  # 1t at r~0 -> no demand penalty
         assert candidate.score_per_hour == 44586.0 / (120.0 / 3600)
+        # generation_confidence(1.0, body_context found) x mining_cycle(estimated=0.85)
+        # x market freshness(~1.0, observed_at is effectively "now")
+        assert candidate.confidence == pytest.approx(0.85, abs=1e-6)
 
 
 class TestHorizonCompleteButValueUnavailable:

@@ -1,7 +1,9 @@
 # EDpj Phase 2-5 Confidence / Explainability Design Baseline
 
-**Version:** 0.2  
-**Status:** Design Baseline (not implemented) -- §7.2追記（実装前レビューで確定したcomponent confidence/freshness集約/ValueResultの具体的決定）  
+**Version:** 0.3  
+**Status:** §7/§7.2で確定したConfidence合成（generation_confidence保持、Market/Cargo=measured=1.00、freshness=MIN集約、`ValueResult`化）を実装完了（`app/scoring/confidence.py`, `app/scoring/value.py`のValueResult化, `app/scoring/pipeline.py`統合）。260→273テスト全通過。ReasonFact/DataSource/narration（§8/§9、本書内部の呼称で「2-5D」）は引き続き未着手。
+
+**用語の補足**: 本書§10が内部的に定義する「Phase 2-5A〜D」という細分ラベルは、`docs/MARKET_PREDICTABILITY_SPEC_V0.1.md` §14が定義する「Phase 2-5A（Market Predictability、実装済み・commit `4b4d782`）/Phase 2-5B（本書、Confidence/Explainabilityの設計）」というラベルとは別体系であり、両ドキュメント間で用語が食い違っている（レビューで発見、cleanupは別途）。実装の会話では「Phase 2-5B=本書の設計確定、Phase 2-5C=本書§7.2の具体的決定の実装」という呼称で進めており、本Statusもそれに合わせている。
 **Date:** 2026-09-05  
 **Depends on:** `SPECIFICATION_V0.4.md` v0.7, `IMPLEMENTATION_SPEC_V0.2.md` v0.5, `docs/RECOMMENDATION_EXPLAINABILITY_SPEC_V0.1.md` v0.1, Phase 2-4 ranking (`0fd9182`)
 
@@ -498,7 +500,6 @@ Phase 2-5では以下を行わない。
 - [x] `STABLE/MODERATE/VOLATILE/INSUFFICIENT` の4状態を採用する
 - [x] EDDN Replayと本人Journal E2Eを別評価にする
 - [x] 推定時間後の実績値を主要な実用評価とする方針が確定している
-- [ ] Phase 2-5A実装
-- [ ] Phase 2-5B実装
-- [ ] Phase 2-5C実装
-- [ ] Phase 2-5D実装
+- [x] Phase 2-5A実装（`docs/MARKET_PREDICTABILITY_SPEC_V0.1.md`のラベルでの実装。commit `4b4d782`。本書内部ラベルの「2-5A（Historical Market Dataset）」「2-5B（Market Stability分類）」相当を含むが、Model Applicability Gateの配線・Historical Replayによる閾値較正は未着手のまま）
+- [x] Phase 2-5B/2-5C実装（本書§7/§7.2のConfidence合成。`app/scoring/confidence.py`新設、`calculate_value()`の`ValueResult`化、`app/scoring/pipeline.py`統合。260→273テスト）
+- [ ] Phase 2-5D実装（ReasonFact retrofit / DataSource propagation / narration / Recommendation explanation — §8/§9、未着手）

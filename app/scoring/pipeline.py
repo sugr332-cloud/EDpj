@@ -1,7 +1,8 @@
-"""Phase 2-2/2-3 candidate pipeline: generate -> filter -> horizon -> value -> classify.
+"""Phase 2-2/2-3/2-5C candidate pipeline: generate -> filter -> horizon -> value -> confidence -> classify.
 
 Spec (docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md §1, §9, §10, §11;
-docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §0/§1/§6/§7).
+docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §0/§1/§6/§7;
+docs/PHASE_2_5_CONFIDENCE_EXPLAINABILITY_DESIGN_BASELINE_V0.1.md §7.2, v0.2).
 
 Value is attempted for every passed candidate regardless of horizon
 completeness -- `complete`/`incomplete` classification requires BOTH axes
@@ -10,10 +11,11 @@ AND value_unavailable_reason is None`), not horizon alone. A candidate
 that is horizon-complete but value-unavailable (e.g. `bio_current_body`,
 whose species value model doesn't exist yet) still ends up in
 `incomplete`, holding whatever it does have -- see IncompleteCandidate's
-docstring. `confidence` on a `complete` `ActionCandidate` still only
-holds the generation-stage `generation_confidence` (not the real composed
-confidence formula, Ranking's job in Phase 2-4) — they are *scoreable
-drafts*, not finished recommendations.
+docstring. `confidence` on a `complete` `ActionCandidate` is now the real
+`generation_confidence × Π(horizon component confidence) × market
+freshness` composition (Phase 2-5C) — they are *scoreable drafts*, not
+finished recommendations (reasons/data_sources/narration are still
+Phase 2-6's job).
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.bio.candidates import DEFAULT_DISTANCE_LIMIT_LY, generate_bio_candidates
 from app.db.models.player import PlayerState
 from app.mining.candidates import generate_mining_candidates
+from app.scoring.confidence import calculate_confidence
 from app.scoring.filters import apply_filters
 from app.scoring.models import (
     ActionCandidate,
@@ -68,9 +71,12 @@ def generate_and_classify(
     for draft in passed:
         components, _horizon_complete, total_seconds = build_horizon(draft.required_segments, session)
         blocking = _blocking_segments(components)
-        expected_value, value_unavailable_reason = calculate_value(draft, session)
+        value_result = calculate_value(draft, session)
+        expected_value = value_result.expected_value
+        value_unavailable_reason = value_result.value_unavailable_reason
 
         if is_scoreable(blocking, expected_value, value_unavailable_reason, total_seconds):
+            generation_confidence = draft.generation_confidence if draft.generation_confidence is not None else 0.0
             complete.append(
                 ActionCandidate(
                     action=draft.action,
@@ -80,7 +86,9 @@ def generate_and_classify(
                     horizon_components=components,
                     horizon_complete=True,
                     score_per_hour=calculate_score(expected_value, total_seconds),
-                    confidence=draft.generation_confidence if draft.generation_confidence is not None else 0.0,
+                    confidence=calculate_confidence(
+                        generation_confidence, components, value_result.market_observed_ats
+                    ),
                     reason="",
                 )
             )
