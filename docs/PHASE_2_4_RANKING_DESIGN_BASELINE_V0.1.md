@@ -1,7 +1,7 @@
 # EDpj Phase 2-4 Ranking / Recommendation Design Baseline
 
 **Version:** 0.2
-**Status:** Design Baseline Fixed（レビューで§10の4点すべて確定。NextActionResponseにrejectedフィールドを新設）
+**Status:** Implemented（app/scoring/ranking.py実装完了。既存215テスト+新規18テスト、計233テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Depends on:** `docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md`, `docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md` (v0.5), `IMPLEMENTATION_SPEC_V0.2.md` §12.3/§12.4/§13.2, `docs/RECOMMENDATION_EXPLAINABILITY_SPEC_V0.1.md` §4
 
@@ -210,12 +210,12 @@ def assemble_next_action_response(result: CandidatePipelineResult) -> NextAction
 
 ## 11. Phase 2-4 Exit Criteria
 
-- [ ] `MIN_ACTION_CONFIDENCE=0.50`によるconfidence足切りが実装され、Rankingの並び順には一切影響しないことがテストされている
-- [ ] score_per_hour完全同点時、3節のtie-break順で決定論的に順序が確定することがテストされている
-- [ ] `eligible`が0件（complete自体が空）と、`eligible`が0件（全員below threshold）の2ケースで異なる`reason`文言が返ることがテストされている
-- [ ] Recommendation選定に confidence threshold 以外の追加フィルタがないことがテストされている（極小score_per_hourでも1位ならRecommendationになる）
-- [ ] `alternatives`が`ALTERNATIVES_LIMIT`件に制限され、それを超えた分は`RejectedCandidate(category="score")`としてのみ保持されることがテストされている
-- [ ] `below_threshold`の候補が`RejectedCandidate(category="score", reason_code="confidence_below_threshold")`として保持され、単純に捨てられないことがテストされている
-- [ ] `IncompleteCandidate`がRankingに一切影響されず、そのまま`NextActionResponse.incomplete`へ通ることがテストされている
-- [ ] `NextActionResponse.rejected`が`[*filter rejections, *score rejections]`の順で構築され、`Recommendation.rejected`は常に`[]`であることがテストされている
-- [ ] 既存215テストに回帰がない
+- [x] `MIN_ACTION_CONFIDENCE=0.50`によるconfidence足切りが実装され、Rankingの並び順には一切影響しないことがテストされている
+- [x] score_per_hour完全同点時、3節のtie-break順で決定論的に順序が確定することがテストされている
+- [x] `eligible`が0件（complete自体が空）と、`eligible`が0件（全員below threshold）の2ケースで異なる`reason`文言が返ることがテストされている
+- [x] Recommendation選定に confidence threshold 以外の追加フィルタがないことがテストされている（極小score_per_hourでも1位ならRecommendationになる）
+- [x] `alternatives`が`ALTERNATIVES_LIMIT`件に制限され、それを超えた分は`RejectedCandidate(category="score")`としてのみ保持されることがテストされている
+- [x] `below_threshold`の候補が`RejectedCandidate(category="score", reason_code="confidence_below_threshold")`として保持され、単純に捨てられないことがテストされている
+- [x] `IncompleteCandidate`がRankingに一切影響されず、そのまま`NextActionResponse.incomplete`へ通ることがテストされている
+- [x] `NextActionResponse.rejected`が`[*filter rejections, *score rejections]`の順で構築され、`Recommendation.rejected`は常に`[]`であることがテストされている
+- [x] 既存215テストに回帰がない（215 → 233、新規18件はすべてPhase 2-4のRanking関連）

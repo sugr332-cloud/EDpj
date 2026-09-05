@@ -18,6 +18,7 @@ implemented here.
 """
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -200,3 +201,69 @@ def build_horizon(
     complete = all(c.status != "unavailable" for c in components.values())
     total_seconds = sum(c.seconds for c in components.values()) if complete else None
     return components, complete, total_seconds
+
+
+@dataclass
+class DataSource:
+    """docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.5. Not populated anywhere
+    yet — Phase 2-5's job (freshness/confidence composition retrofit).
+    Defined now so `Recommendation` doesn't need a second DTO revision."""
+
+    name: str
+    observed_at: dt.datetime | None
+    received_at: dt.datetime | None
+    freshness: float | None
+
+
+@dataclass
+class ReasonFact:
+    """docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.3. Not generated anywhere
+    yet — Phase 2-5's job (retrofit into Horizon/Value/Confidence/Score).
+    Defined now for the same reason as `DataSource` above."""
+
+    factor: str
+    effect: str  # "positive" | "negative"
+    value: float
+    comparison: float | None
+
+
+@dataclass
+class Recommendation:
+    """docs/PHASE_2_4_RANKING_DESIGN_BASELINE_V0.1.md §5.1: the DTO for a
+    candidate that has been ranked and selected (`select_recommendation`)
+    or kept as a scored runner-up (`build_alternatives`) — reused as-is
+    from docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.1, no intermediate
+    type. `data_sources`/`reasons`/`narration` stay at their defaults in
+    Phase 2-4 (Phase 2-5 populates them); `rejected` stays `[]` in Phase
+    2-4 -- the canonical place for RejectedCandidate is
+    `NextActionResponse.rejected`, not this field (§5.1/§5.3)."""
+
+    action: str
+    target: BioTarget | MiningTarget
+    expected_value: float
+    action_horizon_seconds: float
+    score_per_hour: float
+    confidence: float
+    breakdown: dict[str, HorizonComponent]
+    data_sources: list[DataSource] = field(default_factory=list)
+    reasons: list[ReasonFact] = field(default_factory=list)
+    rejected: list[RejectedCandidate] = field(default_factory=list)
+    narration: str | None = None
+
+
+@dataclass
+class NextActionResponse:
+    """docs/PHASE_2_4_RANKING_DESIGN_BASELINE_V0.1.md §5.3: top-level
+    response DTO. `rejected` is new relative to
+    docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.7 -- it's the canonical,
+    response-level home for both `category="filter"` (Phase 2-2) and
+    `category="score"` (Phase 2-4) RejectedCandidate entries, since a
+    rejection reason belongs to the whole response's audit trail, not to
+    any single Recommendation."""
+
+    next_action: str | None
+    recommendation: Recommendation | None
+    alternatives: list[Recommendation]
+    incomplete: list[IncompleteCandidate]
+    rejected: list[RejectedCandidate]
+    reason: str | None
