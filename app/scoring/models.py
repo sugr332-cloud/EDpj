@@ -45,6 +45,8 @@ class ActionCandidate:
     score_per_hour: float | None
     confidence: float
     reason: str
+    reasons: list[ReasonFact] = field(default_factory=list)
+    data_sources: list[DataSource] = field(default_factory=list)
 
 
 @dataclass

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.scoring.models import ActionCandidate, BioTarget, IncompleteCandidate, MiningTarget, RejectedCandidate
+from app.scoring.models import ActionCandidate, BioTarget, DataSource, IncompleteCandidate, MiningTarget, ReasonFact, RejectedCandidate
 from app.scoring.pipeline import CandidatePipelineResult
 from app.scoring.ranking import (
     ALL_BELOW_CONFIDENCE_REASON,
@@ -33,12 +33,15 @@ def _candidate(
     action_horizon_seconds: float = 3600.0,
     score_per_hour: float = 1000.0,
     confidence: float = 0.85,
+    reasons: list | None = None,
+    data_sources: list | None = None,
 ) -> ActionCandidate:
     target = _mining_target(station_id=station_id, system_name=system_name)
     return ActionCandidate(
         action=action, target=target, expected_value=expected_value,
         action_horizon_seconds=action_horizon_seconds, horizon_components={}, horizon_complete=True,
         score_per_hour=score_per_hour, confidence=confidence, reason="",
+        reasons=reasons or [], data_sources=data_sources or [],
     )
 
 
@@ -204,3 +207,22 @@ class TestAssembleNextActionResponse:
         assert len(response.alternatives) == 1
         assert response.alternatives[0].score_per_hour == 90.0
         assert response.reason is None
+
+    def test_reasons_and_data_sources_are_copied_from_the_candidate(self):
+        reasons = [ReasonFact(factor="expected_value", effect="positive", value=44586.0, comparison=None)]
+        sources = [DataSource(name="market_latest", observed_at=None, received_at=None, freshness=1.0)]
+        winner = _candidate(station_id=1, reasons=reasons, data_sources=sources)
+        result = CandidatePipelineResult(complete=[winner], incomplete=[], rejected=[])
+
+        response = assemble_next_action_response(result)
+
+        assert response.recommendation.reasons == reasons
+        assert response.recommendation.data_sources == sources
+
+    def test_narration_is_always_none_phase_2_5d_does_not_implement_it(self):
+        winner = _candidate(station_id=1)
+        result = CandidatePipelineResult(complete=[winner], incomplete=[], rejected=[])
+
+        response = assemble_next_action_response(result)
+
+        assert response.recommendation.narration is None

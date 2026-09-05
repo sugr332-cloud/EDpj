@@ -58,6 +58,10 @@ class TestCompleteCandidates:
                                      supply=0, demand=178, observed_at=NOW, source="eddn"))
         db_session.add(JournalEvent(file_name="f.log", line_number=3, event_type="Loadout",
                                      timestamp=NOW - dt.timedelta(minutes=20), payload={"CargoCapacity": 32}))
+        # Small enough that r stays in the no-penalty zone (r=11/178 <= 0.25), so
+        # this doesn't change the expected_value assertion below -- just gives
+        # cargo_state_data_source (Phase 2-5D) something real to report.
+        db_session.add(CargoState(commodity_name="platinum", quantity=10, updated_at=NOW))
         _calibrate(db_session, "mining_cycle", 120.0)
         db_session.commit()
 
@@ -73,6 +77,15 @@ class TestCompleteCandidates:
         # generation_confidence(1.0, body_context found) x mining_cycle(estimated=0.85)
         # x market freshness(~1.0, observed_at is effectively "now")
         assert candidate.confidence == pytest.approx(0.85, abs=1e-6)
+
+        # Phase 2-5D: reasons/data_sources are populated on the winning candidate.
+        reason_factors = {r.factor for r in candidate.reasons}
+        assert reason_factors == {"mining_cycle", "expected_value", "confidence", "data_freshness", "score_per_hour"}
+        assert all(r.effect == "positive" for r in candidate.reasons if r.factor in ("expected_value", "score_per_hour"))
+        assert all(r.effect == "negative" for r in candidate.reasons if r.factor not in ("expected_value", "score_per_hour"))
+
+        source_names = {s.name for s in candidate.data_sources}
+        assert source_names == {"market_latest", "cargo_state", "loadout", "calibration_model"}
 
 
 class TestHorizonCompleteButValueUnavailable:

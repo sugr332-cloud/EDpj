@@ -69,6 +69,19 @@ def market_freshness(observed_ats: list[dt.datetime], now: dt.datetime) -> float
     return min(_freshness_for_age(now_naive - _naive(observed_at)) for observed_at in observed_ats)
 
 
+def component_confidence_product(generation_confidence: float, horizon_components: dict[str, HorizonComponent]) -> float:
+    """generation_confidence × Π(HorizonComponent confidence) -- the part
+    of the composition before freshness is applied. Exposed separately
+    (not just inlined in calculate_confidence) so
+    app/scoring/reason_facts.py's confidence_reason_facts() can report
+    this same number without recomputing it independently."""
+    product = generation_confidence
+    for component in horizon_components.values():
+        if component.confidence is not None:
+            product *= component.confidence
+    return product
+
+
 def calculate_confidence(
     generation_confidence: float,
     horizon_components: dict[str, HorizonComponent],
@@ -76,8 +89,6 @@ def calculate_confidence(
     now: dt.datetime | None = None,
 ) -> float:
     now = now or dt.datetime.now(dt.timezone.utc)
-    component_product = generation_confidence
-    for component in horizon_components.values():
-        if component.confidence is not None:
-            component_product *= component.confidence
-    return component_product * market_freshness(market_observed_ats, now)
+    return component_confidence_product(generation_confidence, horizon_components) * market_freshness(
+        market_observed_ats, now
+    )

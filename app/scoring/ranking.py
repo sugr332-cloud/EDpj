@@ -72,6 +72,8 @@ def _to_recommendation(candidate: ActionCandidate) -> Recommendation:
         score_per_hour=candidate.score_per_hour,
         confidence=candidate.confidence,
         breakdown=candidate.horizon_components,
+        reasons=candidate.reasons,
+        data_sources=candidate.data_sources,
     )
 
 
