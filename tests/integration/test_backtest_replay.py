@@ -284,3 +284,32 @@ class TestCollectReplaySamples:
 
         assert len(collection.samples) == len(checkpoints)
         assert collection.checkpoints_without_prediction == 0
+
+
+class TestSharedSweepFeedsBothPhase26BAnd26CAggregation:
+    """docs/PHASE_2_6C_FRESHNESS_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md
+    §5: one collect_replay_samples() call must be reusable by both 2-6B's
+    volatility aggregation and 2-6C's freshness aggregation -- no need to
+    sweep T0/archive access twice for the two different groupings."""
+
+    def test_one_collection_feeds_both_volatility_and_freshness_aggregation(self, db_session):
+        from app.backtest.volatility_evaluation import aggregate_by_volatility_class
+        from app.backtest.freshness_evaluation import aggregate_by_freshness_bucket
+
+        for i in range(30):
+            _insert(db_session, 100, "platinum", T0 - dt.timedelta(hours=i), 40000 + i * 50)
+        checkpoints = generate_t0_checkpoints(T0 - dt.timedelta(hours=10), T0, dt.timedelta(hours=2))
+
+        collection = collect_replay_samples(
+            db_session, 100, "platinum", checkpoints, window_days=7, horizon=dt.timedelta(hours=1)
+        )
+
+        volatility_stats = aggregate_by_volatility_class(collection.samples)
+        freshness_stats = aggregate_by_freshness_bucket(collection.samples)
+
+        assert sum(s.sample_count + s.missing_actual_count for s in volatility_stats.values()) == len(
+            collection.samples
+        )
+        assert sum(s.sample_count + s.missing_actual_count for s in freshness_stats.values()) == len(
+            collection.samples
+        )
