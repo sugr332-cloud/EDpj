@@ -1,7 +1,7 @@
 # EDpj Phase 2-6B Volatility Evaluation Implementation Baseline
 
 **Version:** 0.2
-**Status:** Implemented（v0.1: `app/backtest/volatility_evaluation.py`新設、既存308テスト+新規23テスト=331。v0.2: Metric Selection & Threshold Sensitivity追加 — `app/backtest/volatility_metric_evaluation.py`新設。既存403テスト+新規17テスト、計420テスト全通過。Exit Criteria全項目達成）
+**Status:** ツール実装Implemented（v0.1/v0.2、420テスト全通過）／**探索的評価：継続保留**（§17.2）— コードは完成・実データで動作確認済みだが、候補stationが3件（うち実質1件のみ価格変動あり）に限られるため`STABLE_MEDIAN_PRICE_CHANGE`/`MODERATE_MEDIAN_PRICE_CHANGE`の採用判断には進めない。本人の新規station Docked（`MarketSnapshot`蓄積）を待って再開する
 **Date:** 2026-09-05
 **Revision note（v0.2、実データ20×7 Model Validation Runで発見）**: `median_abs_price_change`（現行`classify()`の分類基準）が、隣接観測ペアの過半数が無変化の場合に構造的に0へ張り付くこと、およびforecast_errorとのSpearman相関がN=20で`median=0.806`に対し`p95_abs_price_change`/`nonzero_change_ratio`/`max_abs_price_change`が`0.90〜0.94`と有意に強いことを実測で発見した（`pair_n`単体は`-0.126`でほぼ無相関——観測数の多さが相関の交絡ではないことも確認済み）。v0.2は「p95をそのまま新閾値に採用する」のではなく、**指標選定→閾値感度分析→分類→forecast error評価**という評価プロセスそのものを追加する（§16）。§0〜§15の既存決定・既存関数（`classify()`, `aggregate_by_volatility_class()`, `evaluate_ordering_hypothesis()`, `MIN_SAMPLES_FOR_EVALUATION`等）は変更しない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §4/§8/§9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `43f2604`、実データ20×7 Model Validation結果）, `app/backtest/replay.py`, `app/market/predictability.py`, `app/market/volatility.py`, `app/calibration/metrics.py`
@@ -414,3 +414,40 @@ sweep_metric_thresholds()がいかなる自動採用判断（GO/NO_GO等）も�
 ```
 
 この結果を見て、2-6E §7の採用判断（p95ベース分類を採用候補にするか、3クラスではなく2値分類を検討するか、あるいはさらなるデータ拡大が必要か）を次に決める。**本番のVolatility閾値（`STABLE_MEDIAN_PRICE_CHANGE`/`MODERATE_MEDIAN_PRICE_CHANGE`）はこの段階でも変更しない。**
+
+### 17.2 30 targetでの再評価結果 → 探索的評価：継続保留
+
+実際に`select_diverse_model_validation_targets(max_targets=30)`を実行し、§17.1の再評価を行った。
+
+```text
+                20 target    30 target
+median相関       0.806        0.367
+p95相関          0.941        0.783
+STABLE           326          526（+200）
+MODERATE           3            3（不変）
+VOLATILE           3            3（不変）
+```
+
+**追加した10 targetは全てHoffman由来**（Ross Siloのeligibleは4件で20 target時点で既に使い切っていた）。10件とも既存のHoffman commodityと同様に静的で、STABLEにのみ積み増しされ、**MODERATE/VOLATILEは1件も増えなかった**。相関係数の低下も、静的なHoffman commodityが希釈的に加わったことで説明できる。
+
+**この結果が確定させたこと**: `MODERATE`/`VOLATILE`のサンプルは事実上Ross Silo（`nonlethalweapons`/`reactivearmour`）由来のみで構成されており、そのeligible poolは4件で頭打ちである。**「target数を増やせば解決する」という仮説はこれで棄却された**——同一station群内でcommodityを増やしても市場状態の多様性は増えない。真のボトルネックは**station多様性**であり、現在の候補station（本人の実Docked実績3件）そのものが狭すぎることが実データで確定した。
+
+**結論（レビューで確定）: 2-6Bをここで一旦クローズし、状態を「探索的評価：継続保留」とする。**
+
+```text
+Volatility indicator
+    ↓
+p95_abs_price_change（medianより有望、相関0.78〜0.94）
+    ↓
+forecast errorとの関係: 再現性あり（20/30 targetの両方で確認）
+    ↓
+しかし市場状態の多様性不足（候補stationが3件、うち実質1件のみ変動あり）
+    ↓
+threshold adoption: 不可（MODERATE/VOLATILEのサンプル数が構造的に増えない）
+```
+
+- **本番のVolatility classification（`app/market/predictability.py`の`classify()`/`STABLE_MEDIAN_PRICE_CHANGE`/`MODERATE_MEDIAN_PRICE_CHANGE`）は現行仕様のまま変更しない。**
+- **`(0.03, 0.09)`は「採用候補」ではなく「次回検証時の候補閾値」として本書に保存する**（§17.1に記載済み）。
+- **`MIN_DISCOVERY_OBSERVATIONS=3`は今は変更しない**——「候補observation数が少なくとも3程度はないと、そのcommodityの価格変動を評価する意味が薄い」というデータ品質上の意味を持つ値であり、これを緩めてtarget数を水増ししても、同一station内のcommodityが増えるだけでノイズが増える可能性が高い（§17.2で実証済みのパターン）。
+- **再開条件**: 本人の実プレイで新しいstationへDockし、Commodities Marketを開いて`MarketSnapshot(source='journal')`が記録される（候補stationが増える）まで、2-6Bの追加評価は行わない。評価のためだけにプレイする必要はなく、通常プレイで自然に条件が満たされるのを待つ。候補stationが増えた時点で、`select_diverse_model_validation_targets()`を再実行し、§16.2〜16.4/§17.1と同じ分析を繰り返す。
+- **Bio（生体サンプル探査）の有効性検証はこの市場Volatility検証とは別ライン**であり、Bio Value Model実装後に独立したBacktest/Go-No-Goを設ける。本書のクローズはBio側の作業に影響しない。
