@@ -17,12 +17,14 @@ expected_value_base = biological_signal_count × expected_value_per_signal
 
 という**シグナル数×校正済み平均単価**モデルとする。`expected_value_per_signal`は本人の実`SellOrganicData`/`ScanOrganic`履歴から校正する。
 
-**なぜこの野心度か**: `IMPLEMENTATION_SPEC_V0.2.md` §11.1が定義する`expected_value_base = Σ p(s) × base_value(s)`という式を文字通り実装するには、(a) 未調査天体のspecies確率`p(s)`を予測する機構と、(b) species別の固定売却額表`base_value(s)`が必要だが、**このプロジェクトは現在どちらも持たない**——genus/species情報は本人の`ScanOrganic`（実際にスキャン後）でしか得られず、他プレイヤーのDSS結果（`saasignalsfound/1`）は購読していない。これを今から導入するとBio Value Model自体より大きな新規データパイプラインになる（§9のV2候補）。V1は「現在のデータ境界の中で成立する最小モデル」と位置づける。
+**なぜこの野心度か**: `IMPLEMENTATION_SPEC_V0.2.md` §11.1が定義する`expected_value_base = Σ p(s) × base_value(s)`という式を文字通り実装するには、(a) 未調査天体のspecies確率`p(s)`を予測する機構と、(b) species別の固定売却額表`base_value(s)`が必要だが、**V1着手時点ではこのプロジェクトはどちらも持っていなかった**——genus/species情報は本人の`ScanOrganic`（実際にスキャン後）でしか得られないと当時考えていた。V1は「その時点でのデータ境界の中で成立する最小モデル」として設計した。
+
+**訂正（2026-09-06、Feasibility調査により判明）**: 当初この節は「他プレイヤーのDSS結果は`saasignalsfound/1`で購読できるが未購読」という前提でV2候補を記録していたが、**`saasignalsfound/1`というEDDNスキーマは実在しない**（EDCD/EDDN公式リポジトリ・EDDN Monitor共に該当なし、2026-09-06に直接確認）。誤情報だったためこの記述は削除した。実際には`scanorganic/1`という別の実在スキーマが、`Genus`/`Species`を直接含む形でライブ配信されており、`edgalaxydata.space`に日次アーカイブもされている。V1後の方向性は`docs/CLAUDE_FORMULA_VALIDATION_DIRECTIVE_V0.1.md`に切り出した。
 
 **明示的にスコープ外:**
 
 ```text
-- genus/species予測（V2、§9で候補として記録するのみ）
+- genus/species予測（V2、`docs/CLAUDE_FORMULA_VALIDATION_DIRECTIVE_V0.1.md`へ移管）
 - 惑星条件からのspecies分布予測（V3、§9で候補として記録するのみ）
 - expected_value_best（FD upside）の実装 -- ranking正本ではなく参考値
   （SPECIFICATION_V0.4.md §10）であり、V1では常にNoneのまま
@@ -242,22 +244,9 @@ generate_bio_next_system_candidates()がBioTarget.system_address/body_idを
 
 ## 8. V2/V3ロードマップ（本書のスコープ外、記録のみ）
 
-```text
-V1（本書）  Signal-Count Generic Value
-    ↓
-V2          Genus-level Value
-             - 新規EDDN購読: saasignalsfound/1
-             - 他プレイヤーDSS済み天体はgenus単位で既知になる
-             - base_value(genus)はそのgenus内の既知最小値を保守的に使用
-             - DSS未済み天体はV1のgeneric valueへフォールバック
-    ↓
-V3          Planet-Condition Species Prediction
-             - 大気/温度/重力/火山活動/恒星クラス等からのcodexルールベース予測
-             - 静的genus/species要件テーブルの新規導入（データキュレーション）
-             - Body静的モデルへtemperature/volcanism/parent star class等を追加
-```
+**2026-09-06訂正**: 本節はV1着手時点で「V2はsaasignalsfound/1という新規EDDN購読が必要」と記録していたが、そのスキーマは実在しないことが判明した（§0訂正参照）。V2の正しい方向性・検証要件・受け入れ条件は`docs/CLAUDE_FORMULA_VALIDATION_DIRECTIVE_V0.1.md`に切り出した——本書はV1（signal-count generic value）の実装記録としてのみ確定させ、V2以降の設計はここで凍結せず別文書に一本化する。
 
-V2/V3は本書のExitに含めない。V1実装後、実データでのBio Backtest（Mining/Volatility Evaluationと同じ「実際の収益 vs 予測値」比較、独立したPhaseとして設計）の結果を見てから、V2着手の要否を判断する——これは`docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`が閾値設計で辿った「探索→追加データ→確証→採用判断」と同じ規律をBioにも適用する。
+V1はV2確立までの間、唯一のfallback baselineとして機能し続ける（Value自体がNoneになるくらいなら、V1の粗いsignal-count推定の方がマシ、という位置づけ）。V1のformulaを最終系として扱わないことは`CLAUDE_FORMULA_VALIDATION_DIRECTIVE_V0.1.md`で明文化した。
 
 ## 9. 決定事項サマリ
 
@@ -267,3 +256,4 @@ V2/V3は本書のExitに含めない。V1実装後、実データでのBio Backt
 4. **§3 校正は本人のJournal全体から**: `SellOrganicData`のValue+Bonus合計 ÷ `ScanOrganic`(Analyse)件数。データ不足時はNone（0除算しない）。現時点でこのプレイヤーには適用データが0件で、実プレイ待ちになる
 5. **§5 expected_value_best（FD upside）は実装しない**: fd_multiplierを推測で埋めることを避ける。V1はranking正本（base）のみ
 6. **§9 bio_returnも既知species活用を見送る**: bio_returnは技術的にはScanOrganicのGenus/Speciesが既知だが、3アクション間でV1の入力ソースを統一するため、既知species活用はV2以降の検討事項とする
+7. **2026-09-06訂正: 「実プレイ待ち」は本人のSellOrganicData/ScanOrganic校正にのみ当てはまり、Bio Value Model全体の話ではない**: 上記4はV1の校正ロジック（本人のJournalのみを見る）の帰結であって、Bio Value Model自体が外部データ不在で行き詰まっているという意味ではなかった。Feasibility調査で`scanorganic/1`（他プレイヤーのGenus/Species付きスキャン結果、EDDNでライブ配信+アーカイブ済み）の存在を確認済み——詳細と今後の要件は`docs/CLAUDE_FORMULA_VALIDATION_DIRECTIVE_V0.1.md`
