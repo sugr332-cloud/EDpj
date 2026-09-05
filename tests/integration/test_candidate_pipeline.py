@@ -4,6 +4,7 @@ import datetime as dt
 
 import pytest
 
+from app.bio.conditions import BIOLOGICAL_SIGNAL_TYPE
 from app.db.models.calibration import CalibrationModel
 from app.db.models.eddn import BodyBioSignal
 from app.db.models.journal import JournalEvent
@@ -109,9 +110,14 @@ class TestHorizonCompleteButValueUnavailable:
         assert mining_continue[0].expected_value is None
         assert mining_continue[0].value_unavailable_reason == "cargo_capacity_unknown"
 
-    def test_bio_current_body_stays_incomplete_because_species_value_model_is_unimplemented(self, db_session):
+    def test_bio_current_body_stays_incomplete_when_calibration_data_unavailable(self, db_session):
+        # docs/PHASE_3_BIO_VALUE_MODEL_V1_DESIGN_BASELINE_V0.1.md: the
+        # signal-count Value model needs SellOrganicData history to
+        # calibrate expected_value_per_signal -- this fixture has a real
+        # biological signal (so signal_count > 0) but no sell history
+        # at all, so Value stays unavailable for that reason specifically.
         db_session.add(
-            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=1, body_id=5, signal_type=BIOLOGICAL_SIGNAL_TYPE, count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         _calibrate(db_session, "descent", 60.0)
@@ -125,7 +131,7 @@ class TestHorizonCompleteButValueUnavailable:
         bio_current = [c for c in result.incomplete if c.action == "bio_current_body"]
         assert len(bio_current) == 1
         assert bio_current[0].blocking_segments == []
-        assert bio_current[0].value_unavailable_reason == "species value model not implemented"
+        assert bio_current[0].value_unavailable_reason == "insufficient_sell_history"
 
 
 class TestValuePreservedDespiteIncompleteHorizon:
@@ -182,7 +188,7 @@ class TestIncompleteCandidates:
         db_session.add(System(system_address=1, name="Origin", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
         db_session.add(System(system_address=2, name="Nearby", x=10.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
         db_session.add(
-            BodyBioSignal(system_address=2, body_id=5, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=2, body_id=5, signal_type=BIOLOGICAL_SIGNAL_TYPE, count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         db_session.commit()
@@ -205,7 +211,7 @@ class TestPipelineToggles:
 
     def test_bio_disabled_produces_no_bio_candidates(self, db_session):
         db_session.add(
-            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=1, body_id=5, signal_type=BIOLOGICAL_SIGNAL_TYPE, count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         db_session.commit()
@@ -227,8 +233,10 @@ class TestDesignDocRegression:
     docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §0/§2 (v0.4) adds a
     second, independent axis on top of that: horizon_complete is no longer
     sufficient for `result.complete` on its own. This fixture has no
-    `Loadout` event, so mining_continue's cargo capacity is unknown, and no
-    species value model exists for bio_current_body -- both stay
+    `Loadout` event, so mining_continue's cargo capacity is unknown; and
+    although bio_current_body now has a signal-count Value model (Phase 3,
+    docs/PHASE_3_BIO_VALUE_MODEL_V1_DESIGN_BASELINE_V0.1.md), this fixture
+    has no SellOrganicData sell history to calibrate it from -- both stay
     horizon-complete-but-value-blocked `IncompleteCandidate`s, and
     `result.complete` is empty."""
 
@@ -244,12 +252,12 @@ class TestDesignDocRegression:
                                      supply=0, demand=178, observed_at=NOW, source="eddn"))
         # Bio: current body signal + a nearby system + unsold data
         db_session.add(
-            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=1, body_id=5, signal_type=BIOLOGICAL_SIGNAL_TYPE, count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         db_session.add(System(system_address=2, name="Nearby", x=10.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
         db_session.add(
-            BodyBioSignal(system_address=2, body_id=9, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=2, body_id=9, signal_type=BIOLOGICAL_SIGNAL_TYPE, count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         db_session.add(JournalEvent(file_name="f.log", line_number=10, event_type="ScanOrganic",
@@ -288,7 +296,7 @@ class TestDesignDocRegression:
         assert incomplete_by_action["bio_current_body"].blocking_segments == []
         assert (
             incomplete_by_action["bio_current_body"].value_unavailable_reason
-            == "species value model not implemented"
+            == "insufficient_sell_history"
         )
 
 

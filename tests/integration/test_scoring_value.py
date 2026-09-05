@@ -4,12 +4,12 @@ import datetime as dt
 
 import pytest
 
+from app.db.models.eddn import BodyBioSignal
 from app.db.models.journal import JournalEvent
 from app.db.models.market import MarketLatest
 from app.db.models.player import CargoState
 from app.scoring.models import BioTarget, DraftCandidate, MiningTarget
 from app.scoring.value import (
-    BIO_VALUE_UNAVAILABLE_REASON,
     MINING_START_VALUE_UNAVAILABLE_REASON,
     calculate_value,
 )
@@ -32,10 +32,10 @@ def _bio_target(**overrides) -> BioTarget:
     return BioTarget(**defaults)
 
 
-class TestMiningStartAndBioValueDeferred:
-    """docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §4.4/§5: these
-    four actions have no Phase 2-3 value model at all -- not a per-candidate
-    data gap, so the reason is always the same fixed string."""
+class TestMiningStartValueDeferred:
+    """docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §4.4/§5:
+    mining_start has no value model at all -- not a per-candidate data
+    gap, so the reason is always the same fixed string."""
 
     def test_mining_start_value_is_always_unavailable(self, db_session):
         draft = DraftCandidate(
@@ -47,25 +47,142 @@ class TestMiningStartAndBioValueDeferred:
         assert reason == MINING_START_VALUE_UNAVAILABLE_REASON
         assert result.market_observed_ats == []  # no Market observation was ever consulted
 
-    def test_bio_current_body_and_bio_next_system_value_is_always_unavailable(self, db_session):
-        for action, segments in [
-            ("bio_current_body", ["descent", "bio_sample", "ascent"]),
-            ("bio_next_system", ["jump", "supercruise", "descent", "bio_sample", "ascent"]),
-        ]:
-            draft = DraftCandidate(action=action, target=_bio_target(), required_segments=segments)
-            result = calculate_value(draft, db_session)
-            value, reason = result.expected_value, result.value_unavailable_reason
-            assert value is None
-            assert reason == BIO_VALUE_UNAVAILABLE_REASON
 
-    def test_bio_return_value_is_always_unavailable(self, db_session):
+class TestBioValue:
+    """docs/PHASE_3_BIO_VALUE_MODEL_V1_DESIGN_BASELINE_V0.1.md §4: unlike
+    mining_start, Bio's value_unavailable_reason is per-candidate
+    (no biological signal count, or no calibration data yet) -- not a
+    single fixed "not implemented" string."""
+
+    def _add_biological_signal(self, session, system_address: int, body_id: int, count: int):
+        session.add(
+            BodyBioSignal(
+                system_address=system_address, body_id=body_id, signal_type="$SAA_SignalType_Biological;",
+                count=count, source="eddn", first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW,
+            )
+        )
+
+    def _sell(self, session, line: int, value: int, bonus: int = 0, timestamp: dt.datetime = NOW):
+        session.add(
+            JournalEvent(
+                file_name="f.log", line_number=line, event_type="SellOrganicData", timestamp=timestamp,
+                payload={"BioData": [{"Species": "A", "Value": value, "Bonus": bonus}]},
+            )
+        )
+
+    def _analysed_scan(self, session, line: int, timestamp: dt.datetime = NOW):
+        session.add(
+            JournalEvent(
+                file_name="f.log", line_number=line, event_type="ScanOrganic", timestamp=timestamp,
+                payload={"ScanType": "Analyse"},
+            )
+        )
+
+    def test_bio_current_body_no_biological_signal_count_when_target_has_none(self, db_session):
+        draft = DraftCandidate(
+            action="bio_current_body",
+            target=_bio_target(system_address=1, body_id=5),
+            required_segments=["descent", "bio_sample", "ascent"],
+        )
+        result = calculate_value(draft, db_session)
+        assert result.expected_value is None
+        assert result.value_unavailable_reason == "no_biological_signal_count"
+
+    def test_bio_current_body_insufficient_sell_history_when_no_calibration_data(self, db_session):
+        self._add_biological_signal(db_session, 1, 5, count=3)
+        db_session.commit()
+
+        draft = DraftCandidate(
+            action="bio_current_body",
+            target=_bio_target(system_address=1, body_id=5),
+            required_segments=["descent", "bio_sample", "ascent"],
+        )
+        result = calculate_value(draft, db_session)
+        assert result.expected_value is None
+        assert result.value_unavailable_reason == "insufficient_sell_history"
+
+    def test_bio_current_body_computes_signal_count_times_calibrated_value(self, db_session):
+        self._add_biological_signal(db_session, 1, 5, count=3)
+        self._sell(db_session, 1, value=1000)
+        self._analysed_scan(db_session, 2)
+        db_session.commit()
+
+        draft = DraftCandidate(
+            action="bio_current_body",
+            target=_bio_target(system_address=1, body_id=5),
+            required_segments=["descent", "bio_sample", "ascent"],
+        )
+        result = calculate_value(draft, db_session)
+        assert result.value_unavailable_reason is None
+        assert result.expected_value == 3 * 1000.0
+
+    def test_bio_next_system_uses_same_value_logic_as_current_body(self, db_session):
+        self._add_biological_signal(db_session, 2, 7, count=2)
+        self._sell(db_session, 1, value=600)
+        self._analysed_scan(db_session, 2)
+        db_session.commit()
+
+        draft = DraftCandidate(
+            action="bio_next_system",
+            target=_bio_target(system_address=2, body_id=7),
+            required_segments=["jump", "supercruise", "descent", "bio_sample", "ascent"],
+        )
+        result = calculate_value(draft, db_session)
+        assert result.value_unavailable_reason is None
+        assert result.expected_value == 2 * 600.0
+
+    def test_bio_value_ignores_geological_signals(self, db_session):
+        db_session.add(
+            BodyBioSignal(
+                system_address=1, body_id=5, signal_type="$SAA_SignalType_Geological;", count=5,
+                source="eddn", first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW,
+            )
+        )
+        db_session.commit()
+
+        draft = DraftCandidate(
+            action="bio_current_body",
+            target=_bio_target(system_address=1, body_id=5),
+            required_segments=["descent", "bio_sample", "ascent"],
+        )
+        result = calculate_value(draft, db_session)
+        assert result.expected_value is None
+        assert result.value_unavailable_reason == "no_biological_signal_count"
+
+    def test_bio_return_no_unsold_bio_data(self, db_session):
         draft = DraftCandidate(
             action="bio_return", target=_mining_target(), required_segments=["jump", "supercruise", "dock"]
         )
         result = calculate_value(draft, db_session)
-        value, reason = result.expected_value, result.value_unavailable_reason
-        assert value is None
-        assert reason == BIO_VALUE_UNAVAILABLE_REASON
+        assert result.expected_value is None
+        assert result.value_unavailable_reason == "no_unsold_bio_data"
+
+    def test_bio_return_insufficient_sell_history(self, db_session):
+        self._analysed_scan(db_session, 1)  # one completed, unsold sample -- but no sale history to calibrate from
+        db_session.commit()
+
+        draft = DraftCandidate(
+            action="bio_return", target=_mining_target(), required_segments=["jump", "supercruise", "dock"]
+        )
+        result = calculate_value(draft, db_session)
+        assert result.expected_value is None
+        assert result.value_unavailable_reason == "insufficient_sell_history"
+
+    def test_bio_return_computes_unsold_count_times_calibrated_value(self, db_session):
+        self._analysed_scan(db_session, 1, timestamp=NOW - dt.timedelta(minutes=20))  # before the sale below
+        self._sell(db_session, 2, value=900, timestamp=NOW - dt.timedelta(minutes=15))
+        self._analysed_scan(db_session, 3, timestamp=NOW - dt.timedelta(minutes=10))  # unsold (after the sale)
+        self._analysed_scan(db_session, 4, timestamp=NOW - dt.timedelta(minutes=5))  # unsold (after the sale)
+        db_session.commit()
+
+        # calibration: total_organic_sale_credits=900, total_analysed_sample_count=3 (all three scans)
+        # detect_unsold_bio_count: only the 2 scans strictly after the sale
+        draft = DraftCandidate(
+            action="bio_return", target=_mining_target(), required_segments=["jump", "supercruise", "dock"]
+        )
+        result = calculate_value(draft, db_session)
+        assert result.value_unavailable_reason is None
+        assert result.expected_value == 2 * (900 / 3)
 
 
 class TestMiningContinueValueEdgeCases:

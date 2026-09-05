@@ -37,6 +37,14 @@ SCAN_ORGANIC = "ScanOrganic"
 SELL_ORGANIC_DATA = "SellOrganicData"
 ANALYSE_SCAN_TYPE = "Analyse"  # the 3rd/final sample of a species completes it -- see SellOrganicData eligibility
 
+# fssbodysignals/1 reports every signal category on a body (biological,
+# geological, guardian, human, thargoid, ...) into the same
+# `body_bio_signals` table, distinguished only by `signal_type` --
+# nothing upstream filters this to biological-only (docs/PHASE_3_BIO_VALUE_MODEL_V1...
+# §1: found as a latent bug where a geological-only body would
+# incorrectly count as having bio signals).
+BIOLOGICAL_SIGNAL_TYPE = "$SAA_SignalType_Biological;"
+
 # Never asserted as "already scanned"; this is the confidence penalty for
 # not being able to check either way (design doc §5.2).
 USER_UNSCANNED_UNKNOWN_CONFIDENCE = 0.60
@@ -51,7 +59,13 @@ def bio_signals_for_body(session: Session, system_address: int, body_id: int) ->
 
 
 def has_bio_signals(session: Session, system_address: int, body_id: int) -> bool:
-    return len(bio_signals_for_body(session, system_address, body_id)) > 0
+    """Only signal_type == BIOLOGICAL_SIGNAL_TYPE counts -- a body with
+    only geological (or any other non-biological) signal rows must
+    never be treated as having bio signals (docs/PHASE_3_BIO_VALUE_MODEL_V1...
+    §1)."""
+    return any(
+        row.signal_type == BIOLOGICAL_SIGNAL_TYPE for row in bio_signals_for_body(session, system_address, body_id)
+    )
 
 
 def detect_unsold_bio_count(session: Session) -> int:
@@ -103,7 +117,11 @@ def find_nearby_bio_signal_bodies(
         if distance > distance_limit_ly:
             continue
 
-        signals = session.query(BodyBioSignal).filter_by(system_address=system.system_address).all()
+        signals = (
+            session.query(BodyBioSignal)
+            .filter_by(system_address=system.system_address, signal_type=BIOLOGICAL_SIGNAL_TYPE)
+            .all()
+        )
         if not signals:
             continue
 

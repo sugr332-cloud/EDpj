@@ -72,6 +72,13 @@ class BioTarget:
     discovery: DiscoveryState = field(default_factory=DiscoveryState)
     time_breakdown: dict[str, float] = field(default_factory=dict)
     predicted_species: list = field(default_factory=list)  # populated by Value stage (§11.1), not Phase 2-2
+    # docs/PHASE_3_BIO_VALUE_MODEL_V1_DESIGN_BASELINE_V0.1.md §2: Value
+    # re-queries BodyBioSignal by ID rather than trusting a count Candidate
+    # Generation might have cached (same "re-derive, don't trust a cached
+    # figure" principle app/scoring/value.py's _mining_sell_value already
+    # documents) -- these are the query keys, not display fields.
+    system_address: int | None = None
+    body_id: int | None = None
 
 
 @dataclass

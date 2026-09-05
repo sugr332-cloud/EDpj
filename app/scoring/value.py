@@ -5,11 +5,13 @@ docs/PHASE_2_5_CONFIDENCE_EXPLAINABILITY_DESIGN_BASELINE_V0.1.md §7.2, v0.2).
 
 `calculate_value` is attempted for every passed candidate regardless of
 horizon completeness (§0/§6) -- it never consults `blocking_segments`.
-Only `mining_sell`/`mining_continue` can currently return a value;
-`mining_start` and all three Bio actions always report a fixed
-`value_unavailable_reason` because their respective value models are
-deliberately out of scope for Phase 2-3 (§4.4/§5), not because of any
-missing per-candidate data.
+`mining_start` still always reports a fixed `value_unavailable_reason`
+(deliberately out of scope, Phase 2-3 §4.4/§5, not a missing
+per-candidate data problem). The three Bio actions now have a value
+model (Phase 3 V1, docs/PHASE_3_BIO_VALUE_MODEL_V1_DESIGN_BASELINE_V0.1.md)
+-- their `value_unavailable_reason` is per-candidate (no biological
+signal count, or no calibration data yet), not a fixed "not implemented"
+string.
 
 `calculate_value` returns a `ValueResult` (not a bare tuple) so it can
 also report which `MarketLatest.observed_at` values actually contributed
@@ -30,18 +32,20 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from app.bio.conditions import BIOLOGICAL_SIGNAL_TYPE, detect_unsold_bio_count
+from app.bio.value import calibrate_expected_value_per_signal
+from app.db.models.eddn import BodyBioSignal
 from app.db.models.market import MarketLatest
 from app.db.models.player import CargoState
 from app.mining.cargo_capacity import get_cargo_capacity
 from app.mining.price import effective_price
 from app.mining.state import MINABLE_COMMODITIES
 from app.mining.yield_model import EXPECTED_REFINED_QUANTITY_PER_EVENT
-from app.scoring.models import DraftCandidate, MiningTarget
+from app.scoring.models import BioTarget, DraftCandidate, MiningTarget
 
 MINING_START_VALUE_UNAVAILABLE_REASON = (
     "not specified by §10.4 (deferred to a future Mining Start Value Model phase)"
 )
-BIO_VALUE_UNAVAILABLE_REASON = "species value model not implemented"
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,53 @@ def _mining_continue_value(target: MiningTarget, session: Session) -> ValueResul
     )
 
 
+def _biological_signal_count(session: Session, system_address: int | None, body_id: int | None) -> int:
+    """Re-queries BodyBioSignal by ID rather than trusting anything
+    Candidate Generation might have counted (docs/PHASE_3_BIO_VALUE_MODEL_V1...
+    §2/§4, same "re-derive, don't trust a cached figure" principle as
+    _mining_sell_value). Only BIOLOGICAL_SIGNAL_TYPE rows are summed --
+    a body with only geological (or other) signals contributes 0."""
+    if system_address is None or body_id is None:
+        return 0
+    rows = (
+        session.query(BodyBioSignal)
+        .filter_by(system_address=system_address, body_id=body_id, signal_type=BIOLOGICAL_SIGNAL_TYPE)
+        .all()
+    )
+    return sum(row.count for row in rows)
+
+
+def _bio_value(target: BioTarget, session: Session) -> ValueResult:
+    """bio_current_body/bio_next_system (spec §4): signal_count ×
+    calibrate_expected_value_per_signal(). Never fabricates a value when
+    either input is missing -- signal_count=0 and "no calibration data
+    yet" are reported as distinct value_unavailable_reason strings
+    rather than collapsed into one."""
+    signal_count = _biological_signal_count(session, target.system_address, target.body_id)
+    if signal_count == 0:
+        return ValueResult(None, "no_biological_signal_count")
+    per_signal = calibrate_expected_value_per_signal(session)
+    if per_signal is None:
+        return ValueResult(None, "insufficient_sell_history")
+    return ValueResult(signal_count * per_signal, None)
+
+
+def _bio_return_value(session: Session) -> ValueResult:
+    """bio_return (spec §4): "value of unsold organic data" (SPECIFICATION_V0.4.md
+    §8.7/§11.4), evaluated with the same per-signal calibration as
+    _bio_value() -- V1 deliberately does not exploit that bio_return's
+    species are actually known (via ScanOrganic's Genus/Species fields),
+    keeping all three Bio actions on one unified input source for now
+    (spec §9, a V2 candidate)."""
+    unsold_count = detect_unsold_bio_count(session)
+    if unsold_count == 0:
+        return ValueResult(None, "no_unsold_bio_data")
+    per_signal = calibrate_expected_value_per_signal(session)
+    if per_signal is None:
+        return ValueResult(None, "insufficient_sell_history")
+    return ValueResult(unsold_count * per_signal, None)
+
+
 def calculate_value(draft: DraftCandidate, session: Session) -> ValueResult:
     """Exactly one of `expected_value`/`value_unavailable_reason` is None
     on any return, matching IncompleteCandidate's/is_scoreable's
@@ -132,7 +183,9 @@ def calculate_value(draft: DraftCandidate, session: Session) -> ValueResult:
         return _mining_continue_value(draft.target, session)
     if draft.action == "mining_start":
         return ValueResult(None, MINING_START_VALUE_UNAVAILABLE_REASON)
-    return ValueResult(None, BIO_VALUE_UNAVAILABLE_REASON)  # bio_current_body / bio_next_system / bio_return
+    if draft.action in ("bio_current_body", "bio_next_system"):
+        return _bio_value(draft.target, session)
+    return _bio_return_value(session)  # bio_return
 
 
 def calculate_score(expected_value: float, action_horizon_seconds: float) -> float | None:

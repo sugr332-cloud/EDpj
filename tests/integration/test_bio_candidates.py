@@ -53,6 +53,10 @@ class TestGenerateBioCurrentBodyCandidates:
         assert candidates[0].required_segments == ["descent", "bio_sample", "ascent"]
         assert candidates[0].target.body_name == "Deciat 2"
         assert candidates[0].generation_confidence == 1.0
+        # docs/PHASE_3_BIO_VALUE_MODEL_V1...§2: Value re-queries BodyBioSignal
+        # by these IDs, so candidate generation must set them.
+        assert candidates[0].target.system_address == 1
+        assert candidates[0].target.body_id == 5
 
 
 class TestGenerateBioNextSystemCandidates:
@@ -68,7 +72,7 @@ class TestGenerateBioNextSystemCandidates:
         _add_system(db_session, 1, "Origin", 0.0, 0.0, 0.0)
         _add_system(db_session, 2, "Nearby", 10.0, 0.0, 0.0)
         db_session.add(
-            BodyBioSignal(system_address=2, body_id=5, signal_type="bio", count=1, source="eddn",
+            BodyBioSignal(system_address=2, body_id=5, signal_type="$SAA_SignalType_Biological;", count=1, source="eddn",
                            first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
         )
         db_session.commit()
@@ -82,6 +86,10 @@ class TestGenerateBioNextSystemCandidates:
         assert candidates[0].required_segments == ["jump", "supercruise", "descent", "bio_sample", "ascent"]
         # Never asserted "unscanned=True" -- reflected as reduced confidence instead.
         assert candidates[0].generation_confidence == USER_UNSCANNED_UNKNOWN_CONFIDENCE
+        # docs/PHASE_3_BIO_VALUE_MODEL_V1...§2: the DESTINATION body's IDs
+        # (system 2), not the origin (system 1).
+        assert candidates[0].target.system_address == 2
+        assert candidates[0].target.body_id == 5
 
 
 class TestGenerateBioReturnCandidates:

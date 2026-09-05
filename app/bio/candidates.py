@@ -42,6 +42,8 @@ def generate_bio_current_body_candidates(session: Session, player_state: PlayerS
         system_name=player_state.current_system or "",
         body_suffix="",
         arrival_dist_from_star_ls=None,
+        system_address=player_state.current_system_address,
+        body_id=player_state.current_body_id,
     )
     return [
         DraftCandidate(
@@ -69,6 +71,10 @@ def generate_bio_next_system_candidates(
             system_name=nearby.system.name,
             body_suffix="",
             arrival_dist_from_star_ls=None,
+            # The destination body's IDs, not origin's -- Value re-queries
+            # BodyBioSignal for this specific candidate body (spec §2).
+            system_address=nearby.system.system_address,
+            body_id=nearby.body_id,
         )
         candidates.append(
             DraftCandidate(
