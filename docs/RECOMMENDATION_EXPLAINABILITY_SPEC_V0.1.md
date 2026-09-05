@@ -1,8 +1,9 @@
 # EDpj Recommendation Explainability Specification
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Status:** Phase 2 Design Baseline  
 **Date:** 2026-09-05  
+**Previous:** 0.1 — Confidence / freshness / ReasonFact / DataSource baseline
 
 ## 1. Design Principle
 
@@ -73,6 +74,8 @@ class ReasonFact:
 - `market_price`
 - `demand_penalty`
 - `data_freshness`
+- `market_stability`
+- `model_applicability`
 - `confidence`
 
 `effect` is also determined by the calculation layer. LLM must not decide whether a factor is positive or negative.
@@ -94,6 +97,7 @@ Examples:
 - jump range is insufficient
 - required data is unavailable
 - destination is otherwise unreachable
+- a required price model is not applicable to the observed market condition
 
 The rejection reason is deterministic and should be recorded as a structured fact.
 
@@ -190,12 +194,48 @@ final_confidence
 
 The freshness factor must be defined per data class/source. At minimum, market observations must decay with age so that a materially stale market does not receive the same confidence as a fresh observation.
 
-The exact decay curves and thresholds are a Phase 2 calibration decision and must be stored as named configuration constants.
+### 6.1 Market Stability is not a score multiplier
+
+Historical market stability is an **applicability diagnostic**, not an expected-value or score multiplier.
+
+Do not implement:
+
+```text
+score_per_hour
+ = expected_value × stability_factor / horizon
+```
+
+or any equivalent implicit price discount based only on volatility.
+
+Instead:
+
+```text
+Historical EDDN
+      ↓
+Market Stability
+      ↓
+Model Applicability
+   ┌──┴──────────┐
+   ↓             ↓
+APPLICABLE   NOT_APPLICABLE
+   ↓             ↓
+normal model   do not present price prediction as reliable
+```
+
+A `VOLATILE` classification does not mean that a fixed percentage should be subtracted from the expected value. It means the historical evidence may be insufficient to justify applying the price model at all.
+
+`INSUFFICIENT` means unknown, not stable.
+
+### 6.2 Historical validation
+
+Market stability thresholds must be derived and validated using historical EDDN observations. The objective is to verify that markets classified as volatile actually exhibit materially worse prediction error, or else revise the classification rule.
+
+The system must not claim that volatility predicts model failure without backtest evidence.
 
 The calculation layer must retain enough metadata to explain confidence reductions, for example:
 
 ```text
-confidence = 0.51
+confidence = 0.61
 
 components:
   travel_time: measured      1.00
@@ -210,7 +250,49 @@ freshness:
 
 Any additional confidence cap or aggregation rule must also be deterministic and visible in the breakdown.
 
-## 7. LLM Contract
+## 7. Historical Replay / Backtest
+
+Phase 2 explainability validation must distinguish deterministic ranking correctness from real-world usefulness.
+
+Historical replay uses past market observations and, where available, the user's own Journal-derived state.
+
+```text
+State at T0
+   ↓
+EDpj prediction
+   ↓
+predicted_value
+predicted_horizon
+predicted_rank
+   ↓
+T0 + predicted_horizon
+   ↓
+observed outcome
+   ↓
+prediction vs actual
+```
+
+The replay must prevent future leakage: observations after T0 must never influence the T0 input state.
+
+EDDN-only replay validates market/ranking behavior; it does not prove the user's realized profit because another player may have generated the observation. User Journal/Credits/Cargo/sale events are required for direct realized-profit validation.
+
+The primary practical evaluation is not extreme precision of the horizon denominator. It is whether the value predicted for an action is reasonably reflected by the actual outcome after the predicted horizon.
+
+Minimum metrics:
+
+```text
+prediction_count
+applicable_count
+insufficient_count
+predicted_value
+actual_value / actual_delta
+absolute_error
+relative_error
+rank_at_T0
+actual_best_outcome
+```
+
+## 8. LLM Contract
 
 Claude/AGY receives only the structured recommendation, deterministic ReasonFacts, breakdown, and relevant source/freshness metadata.
 
@@ -229,7 +311,7 @@ A post-generation validator should extract numeric tokens from `narration` and v
 
 If validation fails, narration must be discarded and the deterministic recommendation must still be shown.
 
-## 8. Explainability UI
+## 9. Explainability UI
 
 The UI must expose at least:
 
@@ -241,6 +323,7 @@ Recommendation
  │   └─ per-segment measured / estimated / unavailable
  ├─ Confidence
  │   └─ component + freshness contributions
+ ├─ Market stability / model applicability
  ├─ Why selected?
  │   └─ ReasonFacts
  ├─ Why others lost?
@@ -251,7 +334,7 @@ Recommendation
 
 The UI must not require narration to explain the recommendation.
 
-## 9. Phase 2 Exit Criteria
+## 10. Phase 2 Exit Criteria
 
 Phase 2 explainability is complete only when all are true:
 
@@ -260,12 +343,16 @@ Phase 2 explainability is complete only when all are true:
 - every unavailable time component has an explicit handling policy
 - recommendation-level confidence is mechanically reproducible
 - freshness affects confidence through named deterministic rules
+- market stability is evaluated from historical data
+- market stability is not used as a score multiplier
+- volatile markets are not presented as reliably price-predictable without historical evidence
+- historical replay prevents future leakage
 - CLI produces a complete recommendation without LLM
 - LLM narration can be omitted without loss of decision information
 - LLM narration is validated against supplied structured facts
 - identical inputs produce identical recommendation, reasons, confidence, and ranking
 
-## 10. Relationship to Phase 0-C
+## 11. Relationship to Phase 0-C
 
 This document does not change the Phase 0-C decision that current Journal-derived supercruise duration is observed telemetry only.
 
