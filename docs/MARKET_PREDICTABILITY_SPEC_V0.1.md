@@ -5,6 +5,7 @@
 **Date:** 2026-09-05  
 **Target:** `SPECIFICATION_V0.7.md` / `IMPLEMENTATION_SPEC_V0.2.md`  
 **Introduced:** Phase 2-5A  
+**Revision note (実装前レビュー):** §3.3として取得戦略（on-demand、bulk import禁止）を追記。実データ検証により、外部アーカイブ`https://edgalaxydata.space/EDDN/`が実在し取得可能であることを確認済み（日次`Commodity-YYYY-MM-DD.jsonl`、2017年8月〜現在、非圧縮、1日あたり約0.9GB）。
 
 ## 1. Purpose
 
@@ -83,6 +84,26 @@ archive_batch / source_identifier
 観測が存在しないことを「価格が安定していた」と解釈しない。
 
 EDDNは観測共有であり、観測頻度・参加者・listener downtime等によって欠損する可能性があるため、観測間隔も分析対象メタデータとして保持する。
+
+### 3.3 取得戦略（実装前レビューで追記、確定）
+
+**確定: on-demand取得のみ。全銀河のbulk importは行わない。** アーカイブの1日分ファイルは非圧縮で約0.9GB（`Commodity-YYYY-MM-DD.jsonl`）あり、分析に必要な期間（例: 90日）を丸ごと取り込むと数十GB規模になる——シングルプレイヤー向けCLIツールの規模に対して明らかに過大であり、Phase 1で確立した「Spansh/EDDNはon-demandのみ取得し、bulk importしない」という既存方針とも矛盾する。
+
+```text
+候補生成 → Value計算で実際に参照した (station_id, commodity_id)
+        ↓
+その (station_id, commodity_id) についてのみ
+        ↓
+必要な観測期間（named configuration、例: 直近90日）分だけ
+        ↓
+該当日のjsonlをストリーミングで読み、対象station_id/commodity_idの行だけ抽出
+        ↓
+station×commodityの時系列（3-4節）を構築
+        ↓
+派生結果（market_predictability、§11）だけ永続化。生のアーカイブ行は保持しない
+```
+
+Value計算とHistorical分析の対象を一致させる（「実際にこの候補のValueが依存したMarket観測」だけを分析する）ことで、無関係なstation/commodityのアーカイブを取得する理由がそもそも発生しない。
 
 ## 4. Market Time Series
 
@@ -385,7 +406,7 @@ CLIはLLM不要で決定論的に実行できること。
 
 Phase 2-5A完了条件:
 
-- [ ] historical EDDN archiveを分析入力として取り込める
+- [ ] historical EDDN archiveをon-demandで（対象station×commodity・必要期間分のみ、bulk importせず）分析入力として取り込める
 - [ ] station × commodity時系列を再構成できる
 - [ ] price / demand volatilityを独立測定できる
 - [ ] observation gap / missingnessを正しく扱える
@@ -470,3 +491,4 @@ Phase 2-5Aで作ったhistorical replay基盤を使い、EDpj全体のranking ac
 8. 原因を観測できない場合、「他プレイヤーの大量売却が原因」と断定しない。
 9. Phase 2-4の`score_per_hour`とtie-break/ranking orderを変更しない。
 10. LLMはpredictability判定、threshold、ranking、value calculationの権限を持たない。
+11. Historical EDDN archiveはon-demandでのみ取得する（実際にValue計算が参照したstation×commodity、必要期間分のみ）。全銀河のbulk importは行わない（§3.3）。

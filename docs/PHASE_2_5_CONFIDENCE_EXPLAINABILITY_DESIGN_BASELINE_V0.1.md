@@ -1,7 +1,7 @@
 # EDpj Phase 2-5 Confidence / Explainability Design Baseline
 
-**Version:** 0.1  
-**Status:** Design Baseline (not implemented)  
+**Version:** 0.2  
+**Status:** Design Baseline (not implemented) -- §7.2追記（実装前レビューで確定したcomponent confidence/freshness集約/ValueResultの具体的決定）  
 **Date:** 2026-09-05  
 **Depends on:** `SPECIFICATION_V0.4.md` v0.7, `IMPLEMENTATION_SPEC_V0.2.md` v0.5, `docs/RECOMMENDATION_EXPLAINABILITY_SPEC_V0.1.md` v0.1, Phase 2-4 ranking (`0fd9182`)
 
@@ -304,6 +304,42 @@ freshnessは原則 `observed_at` を基準とする。
 - Spansh static data: market freshnessとは別管理
 
 具体的curve、threshold、capはPhase 2-5実装時にHistorical Datasetと整合させて決定する。
+
+### 7.2 Component confidenceの実装決定（実装前レビューで確定、Phase 2-5C）
+
+現在Scoreへ到達しうる唯一のActionは`mining_continue`である（`mining_sell`はsupercruiseが常にunavailableなためhorizon_completeにならない — docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md v0.5 §2）。以下は主に`mining_continue`を想定するが、他Actionが将来Score到達可能になった時にも一般化できる形で定義する。
+
+**確定1: `generation_confidence`（Phase 2-2由来）はcomponent_confidenceの積から除外しない。** これまでのPhase 2-2/2-3では`ActionCandidate.confidence`が実質`generation_confidence`のコピーだったため見えにくかったが、`generation_confidence`（例: MiningContextがbody_contextを伴わずmining_activeと判定した場合の0.75）はHorizon/Marketとは独立した不確実性であり、落とすと情報が失われる。
+
+```text
+component_confidence_product
+  = generation_confidence
+  × Π(HorizonComponentごとのconfidence)
+  × 1.00 (Market観測 -- 常にmeasured。EDDN/journalの実測値でモデル推定ではない)
+  × 1.00 (Cargo/Loadout -- 常にmeasured。現在のship stateを直接読むだけ)
+```
+
+Market/Cargoの項は常に1.00（積の単位元）なので、実装では明示的な乗算コードを書かず、コメントでその理由を説明するに留める（存在しない乗算を書く意味がないため）。
+
+**確定2: 複数Market観測を持つ候補（`mining_sell`型）のfreshness集約はMIN。** PRODUCTだと観測数が多いcandidateほど機械的にconfidenceが下がり、「扱うcommodity種類が多いだけ」の候補が構造的に不利になる。MINは「一番古い観測に見合った信頼度」という直感と一致し、観測数に対して中立。
+
+```text
+candidate_freshness_factor = min(freshness_factor(observed_at) for each Market row actually used in Value計算)
+```
+
+**確定3（実装上必須の変更）: `calculate_value()`の返り値を`ValueResult`に変更し、実際に使った`MarketLatest.observed_at`のリストを含める。** Confidence計算がValue計算と別クエリで「使われたはずの行」を再導出すると、Value側の選択ロジックが将来変わった時にConfidenceが実際には使われていない行のfreshnessを参照してしまうリスクがある（同じ選択ロジックの二重実装は禁物）。
+
+```python
+@dataclass
+class ValueResult:
+    expected_value: float | None
+    value_unavailable_reason: str | None
+    market_observed_ats: list[datetime]  # 空リスト = このcandidateはMarket観測を使っていない
+```
+
+`app/scoring/value.py`（`_mining_sell_value`/`_mining_continue_value`/`calculate_value`）と`app/scoring/pipeline.py`の呼び出し側、および既存テストの全呼び出し箇所（タプル2値アンパック）に影響する。Phase 2-3で`MiningTarget`に`station_id`/`commodity_name`を追加した時と同じ「ポリシー変更ではなく実装上必要な配線変更」である。
+
+**暫定decay curve（15節参照、Historical Datasetでの較正が本来必要）**: `FRESHNESS_FULL_THRESHOLD=15分`未満は1.00、`FRESHNESS_FLOOR_THRESHOLD=24時間`以上は`FRESHNESS_FLOOR=0.50`、その間は線形補間。`app/mining/price.py`の`demand_penalty`と同じ「フラット→線形→フラット」形状を、既存パターンとの一貫性のために採用する（根拠はこれ以上強くない——指数減衰等が望ましければPhase 2-5A/2-5Bのbacktest結果を踏まえて修正する）。
 
 ## 8. ReasonFact / DataSource
 
