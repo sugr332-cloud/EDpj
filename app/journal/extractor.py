@@ -24,10 +24,12 @@ def to_journal_event(line: ParsedLine) -> JournalEvent:
     )
 
 
-def _strip_internal_name(name: str) -> str:
+def strip_internal_name(name: str) -> str:
     """Market.json commodity `Name` is already the bare internal name
     (e.g. "platinum"); some journal payloads instead carry the `$x_name;`
-    form. Normalize to the bare form so both agree on one key."""
+    form. Normalize to the bare form so both agree on one key. Public
+    because app/mining/state.py also normalizes MiningRefined's `Type`
+    field the same way."""
     if name.startswith("$") and name.endswith("_name;"):
         return name[1 : -len("_name;")]
     return name
@@ -55,7 +57,7 @@ def extract_market_snapshot(
     rows = [
         MarketSnapshot(
             station_id=station_id,
-            commodity_name=_strip_internal_name(item["Name"]),
+            commodity_name=strip_internal_name(item["Name"]),
             buy_price=item.get("BuyPrice", 0),
             sell_price=item.get("SellPrice", 0),
             supply=item.get("Supply", 0),

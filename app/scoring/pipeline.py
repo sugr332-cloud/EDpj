@@ -1,14 +1,19 @@
-"""Phase 2-2 candidate pipeline: generate -> filter -> horizon -> classify.
+"""Phase 2-2/2-3 candidate pipeline: generate -> filter -> horizon -> value -> classify.
 
-Spec (docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md §1, §9, §10, §11).
+Spec (docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md §1, §9, §10, §11;
+docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §0/§1/§6/§7).
 
-Stops at Horizon Builder — Value/Confidence/Score (later Phase 2 steps,
-docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §1) are not computed. `complete`
-candidates come back as `ActionCandidate` with `expected_value`/
-`score_per_hour` still `None` and `confidence` holding only the
-generation-stage `generation_confidence` (not the real composed
-confidence formula) — they are *horizon-complete drafts*, not finished
-recommendations.
+Value is attempted for every passed candidate regardless of horizon
+completeness -- `complete`/`incomplete` classification requires BOTH axes
+(`is_scoreable`: `blocking_segments == [] AND expected_value is not None
+AND value_unavailable_reason is None`), not horizon alone. A candidate
+that is horizon-complete but value-unavailable (e.g. `bio_current_body`,
+whose species value model doesn't exist yet) still ends up in
+`incomplete`, holding whatever it does have -- see IncompleteCandidate's
+docstring. `confidence` on a `complete` `ActionCandidate` still only
+holds the generation-stage `generation_confidence` (not the real composed
+confidence formula, Ranking's job in Phase 2-4) — they are *scoreable
+drafts*, not finished recommendations.
 """
 from __future__ import annotations
 
@@ -27,7 +32,9 @@ from app.scoring.models import (
     IncompleteCandidate,
     RejectedCandidate,
     build_horizon,
+    is_scoreable,
 )
+from app.scoring.value import calculate_score, calculate_value
 
 
 @dataclass
@@ -59,30 +66,39 @@ def generate_and_classify(
     complete: list[ActionCandidate] = []
     incomplete: list[IncompleteCandidate] = []
     for draft in passed:
-        components, horizon_complete, total_seconds = build_horizon(draft.required_segments, session)
-        if horizon_complete:
+        components, _horizon_complete, total_seconds = build_horizon(draft.required_segments, session)
+        blocking = _blocking_segments(components)
+        expected_value, value_unavailable_reason = calculate_value(draft, session)
+
+        if is_scoreable(blocking, expected_value, value_unavailable_reason):
             complete.append(
                 ActionCandidate(
                     action=draft.action,
                     target=draft.target,
-                    expected_value=None,
+                    expected_value=expected_value,
                     action_horizon_seconds=total_seconds,
                     horizon_components=components,
                     horizon_complete=True,
-                    score_per_hour=None,
+                    score_per_hour=calculate_score(expected_value, total_seconds),
                     confidence=draft.generation_confidence if draft.generation_confidence is not None else 0.0,
                     reason="",
                 )
             )
         else:
-            blocking = _blocking_segments(components)
+            reasons = []
+            if blocking:
+                reasons.append(f"{'/'.join(blocking)} time estimate unavailable")
+            if value_unavailable_reason:
+                reasons.append(f"value unavailable: {value_unavailable_reason}")
             incomplete.append(
                 IncompleteCandidate(
                     action=draft.action,
                     target=draft.target,
                     breakdown=components,
                     blocking_segments=blocking,
-                    reason=f"{'/'.join(blocking)} time estimate unavailable -- cannot compute a score yet",
+                    reason=" -- ".join(reasons) + " -- cannot compute a score yet",
+                    expected_value=expected_value,
+                    value_unavailable_reason=value_unavailable_reason,
                 )
             )
 

@@ -75,7 +75,16 @@ class BioTarget:
 class MiningTarget:
     """IMPLEMENTATION_SPEC_V0.2.md §21. `demand`/`cargo_demand_ratio`/
     `listed_price`/`effective_price` are Value-stage fields (§10.1) --
-    None at Phase 2-2 generation time, filled in later."""
+    None at Phase 2-2 generation time, filled in later.
+
+    `station_id`/`commodity_name` (added Phase 2-3, docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md
+    §4) are plumbing, not new policy: Value needs to re-query
+    MarketLatest for the specific station (mining_sell/bio_return) or
+    commodity (mining_continue) a candidate refers to, and the
+    name-only fields above aren't a reliable re-lookup key. Both are
+    already known at generation time (Station.station_id /
+    MiningContext.last_refined_commodity) -- this just carries them
+    through instead of re-deriving them later."""
 
     station_name: str
     system_name: str  # copy-paste target -- from Journal StarSystem / System.name
@@ -83,6 +92,8 @@ class MiningTarget:
     station_type: str
     arrival_dist_from_star_ls: float | None
     max_landing_pad: str | None = None
+    station_id: int | None = None
+    commodity_name: str | None = None
     demand: int | None = None
     cargo_demand_ratio: float | None = None
     listed_price: int | None = None
@@ -122,19 +133,44 @@ class RejectedCandidate:
 
 @dataclass
 class IncompleteCandidate:
-    """docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.2: a candidate that passed
-    every deterministic filter but whose horizon is incomplete (today,
-    always because it requires `supercruise`, which stays unavailable —
-    see app/routing/time.py). Never dropped, never force-scored; kept
-    separate from Recommendation/RejectedCandidate entirely so it can
-    recover automatically once a real SC estimate exists, without any
-    change to candidate generation (design doc §1.1)."""
+    """docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §2.2, generalized in
+    docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §0/§1: a
+    candidate that passed every deterministic filter but is not yet
+    scoreable, for either (or both) of two independent reasons --
+    `blocking_segments` (horizon-side, e.g. `["supercruise"]`) and
+    `value_unavailable_reason` (value-side, e.g.
+    "species value model not implemented"). Never dropped, never
+    force-scored; kept separate from Recommendation/RejectedCandidate
+    entirely so it can recover automatically once the missing input
+    exists, without any change to candidate generation (design doc §1.1).
+
+    `expected_value` is populated whenever Value could compute it, even
+    if `blocking_segments` is non-empty (e.g. `mining_sell`) -- see
+    design doc §1's Score-eligibility note: it's held here rather than
+    discarded so a future SC estimate doesn't require recomputing Value."""
 
     action: str
     target: BioTarget | MiningTarget
     breakdown: dict[str, HorizonComponent]
     blocking_segments: list[str]
     reason: str
+    expected_value: float | None = None
+    value_unavailable_reason: str | None = None
+
+
+def is_scoreable(
+    blocking_segments: list[str], expected_value: float | None, value_unavailable_reason: str | None
+) -> bool:
+    """docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §1/§7: Phase
+    2-3's Score-eligibility check, evaluated on the raw three inputs
+    (rather than an already-built IncompleteCandidate) so the pipeline
+    can decide which DTO to build -- ActionCandidate or
+    IncompleteCandidate -- from the result, instead of constructing one
+    to find out it should have been the other. Deliberately not named
+    anything Recommendation-shaped -- selecting a winner among scoreable
+    candidates is Phase 2-4's `rank_candidates`/`select_recommendation`,
+    not this function's job."""
+    return blocking_segments == [] and expected_value is not None and value_unavailable_reason is None
 
 
 def build_horizon(

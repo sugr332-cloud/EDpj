@@ -68,6 +68,7 @@ def generate_mining_sell_candidates(session: Session, context: MiningContext) ->
             station_type=station.station_type or "",
             arrival_dist_from_star_ls=station.distance_to_arrival_ls,
             max_landing_pad=_pad_label(station.landing_pad),
+            station_id=station.station_id,
         )
         candidates.append(
             DraftCandidate(
@@ -90,6 +91,7 @@ def generate_mining_continue_candidates(session: Session, context: MiningContext
         parent_body_name=None,
         station_type="ring",
         arrival_dist_from_star_ls=None,
+        commodity_name=context.last_refined_commodity,
     )
     return [
         DraftCandidate(

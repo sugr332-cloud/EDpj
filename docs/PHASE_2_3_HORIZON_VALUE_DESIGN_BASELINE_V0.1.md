@@ -1,7 +1,7 @@
 # EDpj Phase 2-3 Horizon / Value Design Baseline
 
 **Version:** 0.4
-**Status:** Design Baseline Fixed（レビュー2巡目で4件の未決事項を確定、用語をvalue_calculableに統一。レビュー3巡目でRecommendation昇格条件→Score対象判定（is_scoreable）への呼称修正。レビュー4巡目で実装直前の実データ検証により§4.3 Mining Continue Valueを全面修正——MiningRefinedに数量フィールドが存在しないこと、cargo capacityがLoadoutイベントから既存アーキテクチャのまま取得可能なこと、売却市場をeffective_price最大のmarketとして決定論的に選ぶことの3点を確定）
+**Status:** Implemented（Baseline Fixed後、実装完了。既存181テスト+新規23テスト、計204テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Depends on:** `IMPLEMENTATION_SPEC_V0.2.md` §10/§11/§12, `docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md`, `docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md`
 
@@ -211,17 +211,17 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 
 ## 8. Phase 2-3 Exit Criteria
 
-- [ ] `IncompleteCandidate`が`blocking_segments`/`value_unavailable_reason`の2軸で「不完全」を表現できる（用語は`value_calculable`で統一）
-- [ ] Score対象判定条件（`is_scoreable()`: `blocking_segments == [] AND expected_value is not None AND value_unavailable_reason is None`）が実装されている
-- [ ] Mining Sellのeffective price/valueが実装され、テストで検証されている
-- [ ] `app/mining/yield_model.py`が`expected_mined_quantity=1.0`を確定値として扱い（統計モデルを持ち込まない）テストされている
-- [ ] `app/mining/cargo_capacity.py`が最新`Loadout`イベントの`CargoCapacity`を返し、`Loadout`未記録時のみ`None`（`cargo_capacity_unknown`）を返すことがテストされている
-- [ ] Mining Continueの売却市場が「対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件」として決定論的に選ばれ、該当marketが1件もない場合は`value_unavailable_reason="no_market_target"`となることがテストされている
-- [ ] Mining Startはvalue計算を実装せず、常に`value_unavailable_reason="not specified by §10.4 ..."`であることがテストされている
-- [ ] Bio 3種（current_body/next_system/return）すべてが`value_unavailable_reason="species value model not implemented"`で一貫していることがテストされている
-- [ ] `mining_sell`が「expected_valueは分かるがhorizonが不明」という状態でIncompleteCandidateとして保持され、値が失われないことがテストされている
-- [ ] `calculate_score()`（`expected_value / horizon_hours`）は実装するが、`rank_candidates`/`select_recommendation`/`build_alternatives`はPhase 2-4へ持ち越し、実装しない
-- [ ] 既存181テストに回帰がない
+- [x] `IncompleteCandidate`が`blocking_segments`/`value_unavailable_reason`の2軸で「不完全」を表現できる（用語は`value_calculable`で統一）
+- [x] Score対象判定条件（`is_scoreable()`: `blocking_segments == [] AND expected_value is not None AND value_unavailable_reason is None`）が実装されている（`app/scoring/models.py`）
+- [x] Mining Sellのeffective price/valueが実装され、テストで検証されている（`app/mining/price.py`, `app/scoring/value.py`, `tests/integration/test_candidate_pipeline.py`）
+- [x] `app/mining/yield_model.py`が`expected_mined_quantity=1.0`を確定値として扱い（統計モデルを持ち込まない）テストされている
+- [x] `app/mining/cargo_capacity.py`が最新`Loadout`イベントの`CargoCapacity`を返し、`Loadout`未記録時のみ`None`（`cargo_capacity_unknown`）を返すことがテストされている
+- [x] Mining Continueの売却市場が「対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件」として決定論的に選ばれ、該当marketが1件もない場合は`value_unavailable_reason="no_market_target"`となることがテストされている
+- [x] Mining Startはvalue計算を実装せず、常に`value_unavailable_reason="not specified by §10.4 ..."`であることがテストされている
+- [x] Bio 3種（current_body/next_system/return）すべてが`value_unavailable_reason="species value model not implemented"`で一貫していることがテストされている
+- [x] `mining_sell`が「expected_valueは分かるがhorizonが不明」という状態でIncompleteCandidateとして保持され、値が失われないことがテストされている
+- [x] `calculate_score()`（`expected_value / horizon_hours`）は実装するが、`rank_candidates`/`select_recommendation`/`build_alternatives`はPhase 2-4へ持ち越し、実装しない（`app/scoring/value.py`にrank/select/build系関数は一切存在しない）
+- [x] 既存181テストに回帰がない（181 → 204、新規23件はすべてPhase 2-3のValue関連）
 
 ## 9. 決定事項サマリ（レビュー2巡目で確定）
 

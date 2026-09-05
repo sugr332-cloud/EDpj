@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.db.models.journal import JournalEvent
 from app.db.models.player import CargoState
 from app.journal import events as ev
+from app.journal.extractor import strip_internal_name
 
 # Not a game-balance number, just a classification of which commodities
 # are obtained by mining (laser/core mining, Odyssey included) rather than
@@ -84,6 +85,11 @@ class MiningContext:
     mining_active: bool = False
     last_ring_body_id: int | None = None
     last_ring_system_address: int | None = None
+    # docs/PHASE_2_3_HORIZON_VALUE_DESIGN_BASELINE_V0.1.md §4.3 (v0.4):
+    # the commodity of the same recent MiningRefined event used above --
+    # not a separate query, just exposing a field already read here so
+    # Value doesn't need to re-derive "what's being mined right now".
+    last_refined_commodity: str | None = None
     # Reflects how the ring context was derived -- 1.0 when a real
     # MiningRefined + body-context pair was found, lower when mining is
     # inferred from cargo alone with no corroborating recent activity.
@@ -156,12 +162,14 @@ def detect_mining_context(session: Session, lookback: dt.timedelta = DEFAULT_MIN
         )
 
     body_context = _find_body_context_before(session, recent_refined.timestamp)
+    refined_type = recent_refined.payload.get("Type")
     return MiningContext(
         has_mining_cargo=has_mining_cargo,
         ore_cargo=ore_cargo,
         mining_active=True,
         last_ring_body_id=body_context.payload.get("BodyID") if body_context else None,
         last_ring_system_address=body_context.payload.get("SystemAddress") if body_context else None,
+        last_refined_commodity=strip_internal_name(refined_type) if refined_type else None,
         generation_confidence=1.0 if body_context is not None else 0.75,
     )
 
