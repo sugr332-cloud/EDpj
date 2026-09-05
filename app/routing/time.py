@@ -72,6 +72,12 @@ class TimeEstimate:
     basis: str
 
 
+# docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md §1.2: this satisfies the
+# Explainability spec's HorizonComponent shape exactly, so Phase 2 reuses
+# it under that name rather than defining a duplicate class.
+HorizonComponent = TimeEstimate
+
+
 def _unavailable(segment_type: str, basis: str) -> TimeEstimate:
     return TimeEstimate(segment_type=segment_type, status="unavailable", seconds=None, confidence=None, basis=basis)
 

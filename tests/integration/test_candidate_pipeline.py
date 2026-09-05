@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import datetime as dt
+
+from app.db.models.calibration import CalibrationModel
+from app.db.models.eddn import BodyBioSignal
+from app.db.models.journal import JournalEvent
+from app.db.models.market import MarketLatest
+from app.db.models.player import SINGLETON_ID, CargoState, PlayerState
+from app.db.models.static import Station, System
+from app.scoring.pipeline import generate_and_classify
+
+NOW = dt.datetime.now(dt.timezone.utc)
+
+
+def _player_state(**overrides) -> PlayerState:
+    defaults = dict(
+        id=SINGLETON_ID, current_system="Deciat", current_system_address=1, current_body_id=None,
+        current_body_name=None, docked=False, landed=False, on_foot=False, source_status={}, updated_at=NOW,
+    )
+    defaults.update(overrides)
+    return PlayerState(**defaults)
+
+
+def _calibrate(session, segment_type: str, seconds: float) -> None:
+    session.add(
+        CalibrationModel(
+            segment_type=segment_type, seconds=seconds, sample_count_fit=20, sample_count_eval=5,
+            median_absolute_error=0.0, median_signed_error=0.0, r_squared=1.0,
+            validation_status="pass", fitted_at=NOW,
+        )
+    )
+
+
+def _mining_active_fixture(session) -> None:
+    session.add(JournalEvent(file_name="f.log", line_number=1, event_type="ApproachBody",
+                              timestamp=NOW - dt.timedelta(minutes=10), payload={"BodyID": 5, "SystemAddress": 1}))
+    session.add(JournalEvent(file_name="f.log", line_number=2, event_type="MiningRefined",
+                              timestamp=NOW - dt.timedelta(minutes=5), payload={"Type": "$platinum_name;"}))
+
+
+class TestCompleteCandidates:
+    def test_mining_continue_is_complete_when_mining_cycle_is_calibrated(self, db_session):
+        _mining_active_fixture(db_session)
+        db_session.add(System(system_address=1, name="Deciat", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        _calibrate(db_session, "mining_cycle", 120.0)
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state())
+
+        mining_continue = [c for c in result.complete if c.action == "mining_continue"]
+        assert len(mining_continue) == 1
+        assert mining_continue[0].horizon_complete is True
+        assert mining_continue[0].action_horizon_seconds == 120.0
+        assert mining_continue[0].expected_value is None  # Value stage not implemented
+        assert mining_continue[0].score_per_hour is None
+
+    def test_bio_current_body_is_complete_when_segments_are_calibrated(self, db_session):
+        db_session.add(
+            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+                           first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
+        )
+        _calibrate(db_session, "descent", 60.0)
+        _calibrate(db_session, "bio_sample", 90.0)
+        _calibrate(db_session, "ascent", 30.0)
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state(current_body_id=5))
+
+        bio_current = [c for c in result.complete if c.action == "bio_current_body"]
+        assert len(bio_current) == 1
+        assert bio_current[0].horizon_complete is True
+        assert bio_current[0].action_horizon_seconds == 180.0
+
+
+class TestIncompleteCandidates:
+    def test_mining_sell_is_always_incomplete_because_of_supercruise(self, db_session):
+        db_session.add(CargoState(commodity_name="platinum", quantity=10, updated_at=NOW))
+        db_session.add(System(system_address=1, name="Deciat", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(Station(station_id=100, system_address=1, name="Farseer Inc", station_type="Outpost",
+                                distance_to_arrival_ls=100.0, landing_pad={}, has_vista_genomics=False,
+                                is_fleet_carrier=False, source="spansh", updated_at=NOW))
+        db_session.add(MarketLatest(station_id=100, commodity_name="platinum", buy_price=0, sell_price=44586,
+                                     supply=0, demand=178, observed_at=NOW, source="eddn"))
+        # Even calibrating jump/dock fully -- supercruise is never
+        # calibrated at all, so this candidate can never become complete.
+        _calibrate(db_session, "jump", 30.0)
+        _calibrate(db_session, "dock", 15.0)
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state())
+
+        assert result.complete == []
+        assert len(result.incomplete) == 1
+        assert result.incomplete[0].action == "mining_sell"
+        assert result.incomplete[0].blocking_segments == ["supercruise"]
+
+    def test_bio_next_system_is_always_incomplete(self, db_session):
+        db_session.add(System(system_address=1, name="Origin", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(System(system_address=2, name="Nearby", x=10.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(
+            BodyBioSignal(system_address=2, body_id=5, signal_type="bio", count=1, source="eddn",
+                           first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
+        )
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state())
+
+        assert any(c.action == "bio_next_system" for c in result.incomplete)
+        assert all(c.action != "bio_next_system" for c in result.complete)
+
+
+class TestPipelineToggles:
+    def test_mining_disabled_produces_no_mining_candidates(self, db_session):
+        db_session.add(CargoState(commodity_name="platinum", quantity=10, updated_at=NOW))
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state(), mining_enabled=False)
+
+        all_actions = [c.action for c in result.complete] + [c.action for c in result.incomplete]
+        assert not any(a.startswith("mining_") for a in all_actions)
+
+    def test_bio_disabled_produces_no_bio_candidates(self, db_session):
+        db_session.add(
+            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+                           first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
+        )
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state(current_body_id=5), bio_enabled=False)
+
+        all_actions = [c.action for c in result.complete] + [c.action for c in result.incomplete]
+        assert not any(a.startswith("bio_") for a in all_actions)
+
+
+class TestDesignDocRegression:
+    """docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md §9/§12:
+    only mining_continue and bio_current_body can ever be horizon_complete
+    today -- the other four action types structurally require supercruise,
+    which is always unavailable. This must not silently change (e.g. if a
+    future edit accidentally adds supercruise to one of the "no travel"
+    action's required_segments)."""
+
+    def test_all_six_action_types_present_and_correctly_bucketed(self, db_session):
+        # Mining: cargo + market + history, so sell/continue/start all apply
+        _mining_active_fixture(db_session)
+        db_session.add(CargoState(commodity_name="platinum", quantity=10, updated_at=NOW))
+        db_session.add(System(system_address=1, name="Deciat", x=0.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(Station(station_id=100, system_address=1, name="Farseer Inc", station_type="Outpost",
+                                distance_to_arrival_ls=100.0, landing_pad={}, has_vista_genomics=True,
+                                is_fleet_carrier=False, source="spansh", updated_at=NOW))
+        db_session.add(MarketLatest(station_id=100, commodity_name="platinum", buy_price=0, sell_price=44586,
+                                     supply=0, demand=178, observed_at=NOW, source="eddn"))
+        # Bio: current body signal + a nearby system + unsold data
+        db_session.add(
+            BodyBioSignal(system_address=1, body_id=5, signal_type="bio", count=1, source="eddn",
+                           first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
+        )
+        db_session.add(System(system_address=2, name="Nearby", x=10.0, y=0.0, z=0.0, source="spansh", updated_at=NOW))
+        db_session.add(
+            BodyBioSignal(system_address=2, body_id=9, signal_type="bio", count=1, source="eddn",
+                           first_observed_at=NOW, last_observed_at=NOW, updated_at=NOW)
+        )
+        db_session.add(JournalEvent(file_name="f.log", line_number=10, event_type="ScanOrganic",
+                                     timestamp=NOW - dt.timedelta(minutes=5), payload={"ScanType": "Analyse"}))
+        # Calibrate every non-supercruise segment generously
+        for segment_type, seconds in [
+            ("jump", 30.0), ("dock", 15.0), ("mining_cycle", 120.0),
+            ("descent", 60.0), ("bio_sample", 90.0), ("ascent", 30.0),
+        ]:
+            _calibrate(db_session, segment_type, seconds)
+        db_session.commit()
+
+        result = generate_and_classify(db_session, _player_state(current_body_id=5))
+
+        complete_actions = {c.action for c in result.complete}
+        incomplete_actions = {c.action for c in result.incomplete}
+
+        # mining_start is intentionally absent here: it requires
+        # has_mining_cargo == False (§4.3), which is mutually exclusive
+        # with this fixture's ore cargo (needed for mining_sell/continue)
+        # -- the two states can't co-occur, so this isn't a bug. Its own
+        # generation is covered separately in tests/integration/test_mining_candidates.py.
+        assert complete_actions == {"mining_continue", "bio_current_body"}
+        assert incomplete_actions == {"mining_sell", "bio_next_system", "bio_return"}
+        for candidate in result.incomplete:
+            assert candidate.blocking_segments == ["supercruise"]
