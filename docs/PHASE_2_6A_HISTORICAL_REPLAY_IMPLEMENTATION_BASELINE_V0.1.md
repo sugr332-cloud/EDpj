@@ -1,7 +1,7 @@
 # EDpj Phase 2-6A Historical Replay Implementation Baseline
 
 **Version:** 0.2
-**Status:** Design Baseline（策定中。実装未着手）
+**Status:** Implemented（`app/backtest/replay.py`新設、`app/market/predictability.py`から`_compute_volatility_stats()`抽出。既存289テスト+新規19テスト、計308テスト全通過。Exit Criteria全項目達成。commit `c4bbe8e`）
 **Date:** 2026-09-05
 **Revision note（レビュー反映）**: v0.1は§4のforecast errorを`price_change_ratio(prev, curr)`の直接転用として設計しており、「予測値」と「実測値」という2つの独立した概念が1つの計算へ暗黙に融合していた（レビュー指摘）。v0.2は§4を全面改訂し、`PredictionInput`（`observed_at <= t0`のみ）と`ActualObservation`（`t0 < observed_at`のみ）を別々の型として明示的に分離した。予測モデル自体（naive last-value forecast）とその他の節（§1〜§3, §5〜§7）の決定は変更していない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §3/§4/§5（v0.1, commit `013d92c`）, `docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md`（commit `4b4d782`）, `app/market/predictability.py`, `app/market/volatility.py`, `app/db/models/market.py`, `app/collectors/eddn_archive.py`, `tests/conftest.py`（`db_session`フィクスチャパターン）
@@ -302,14 +302,14 @@ DEFAULT_REPLAY_HORIZONSの各値がFRESHNESS_FULL_THRESHOLD/FRESHNESS_FLOOR_THRE
 
 ## 6. Exit Criteria
 
-- [ ] `app/market/predictability.py`から`_compute_volatility_stats()`が抽出され、`analyze_market()`が同一結果を返すことに回帰がない
-- [ ] `app/backtest/replay.py`が新設され、`compare_windows()`が7/14/30日の結果を同時に得られる
-- [ ] `compare_windows()`が`MarketPredictability`テーブルへ一切書き込まないことがテストされている
-- [ ] `PredictionInput`（`observed_at <= t0`のみ参照）と`ActualObservation`（`t0 < observed_at`のみ参照）が別々の型・別々のクエリ関数として実装され、`evaluate_forecast_at()`がこの2つを取り違えようがない構造になっている
-- [ ] ホライズン内に実測観測がない場合に`forecast_error=None`となり、0や補間値で埋めないことがテストされている
-- [ ] `ensure_days_fetched`が公開化され、`app/backtest/replay.py`が独自のarchive取得ロジックを持たない
-- [ ] `DEFAULT_REPLAY_HORIZONS`が`app/scoring/confidence.py`のfreshness閾値と同じ値を参照している（値のハードコード重複がない）
-- [ ] 既存289テストに回帰がない
+- [x] `app/market/predictability.py`から`_compute_volatility_stats()`が抽出され、`analyze_market()`が同一結果を返すことに回帰がない
+- [x] `app/backtest/replay.py`が新設され、`compare_windows()`が7/14/30日の結果を同時に得られる
+- [x] `compare_windows()`が`MarketPredictability`テーブルへ一切書き込まないことがテストされている
+- [x] `PredictionInput`（`observed_at <= t0`のみ参照）と`ActualObservation`（`t0 < observed_at`のみ参照）が別々の型・別々のクエリ関数として実装され、`evaluate_forecast_at()`がこの2つを取り違えようがない構造になっている
+- [x] ホライズン内に実測観測がない場合に`forecast_error=None`となり、0や補間値で埋めないことがテストされている
+- [x] `ensure_days_fetched`が公開化され、`app/backtest/replay.py`が独自のarchive取得ロジックを持たない
+- [x] `DEFAULT_REPLAY_HORIZONS`が`app/scoring/confidence.py`のfreshness閾値と同じ値を参照している（値のハードコード重複がない）
+- [x] 既存289テストに回帰がない
 
 ## 7. 決定事項サマリ
 

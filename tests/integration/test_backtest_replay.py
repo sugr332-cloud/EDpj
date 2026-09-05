@@ -4,8 +4,10 @@ import datetime as dt
 
 from app.backtest.replay import (
     DEFAULT_REPLAY_HORIZONS,
+    collect_replay_samples,
     compare_windows,
     evaluate_forecast_at,
+    generate_t0_checkpoints,
     observe_actual_after,
     predict_naive_persistence,
 )
@@ -220,3 +222,65 @@ class TestDefaultReplayHorizons:
     def test_matches_freshness_curve_breakpoints(self):
         assert DEFAULT_REPLAY_HORIZONS[0] == FRESHNESS_FULL_THRESHOLD
         assert DEFAULT_REPLAY_HORIZONS[-1] == FRESHNESS_FLOOR_THRESHOLD
+
+
+class TestGenerateT0Checkpoints:
+    def test_includes_window_start_and_steps_by_interval(self):
+        checkpoints = generate_t0_checkpoints(T0, T0 + dt.timedelta(hours=2), dt.timedelta(hours=1))
+        assert checkpoints == [T0, T0 + dt.timedelta(hours=1), T0 + dt.timedelta(hours=2)]
+
+    def test_excludes_a_step_past_window_end(self):
+        checkpoints = generate_t0_checkpoints(T0, T0 + dt.timedelta(hours=1, minutes=30), dt.timedelta(hours=1))
+        assert checkpoints == [T0, T0 + dt.timedelta(hours=1)]
+
+    def test_empty_when_window_start_after_window_end(self):
+        assert generate_t0_checkpoints(T0 + dt.timedelta(hours=1), T0, dt.timedelta(hours=1)) == []
+
+    def test_empty_when_interval_is_non_positive(self):
+        assert generate_t0_checkpoints(T0, T0 + dt.timedelta(hours=5), dt.timedelta(0)) == []
+        assert generate_t0_checkpoints(T0, T0 + dt.timedelta(hours=5), dt.timedelta(hours=-1)) == []
+
+    def test_does_not_sync_to_observation_timestamps(self):
+        # Purely a function of window_start/window_end/interval -- no
+        # session/observation argument exists to sync against.
+        import inspect
+
+        params = list(inspect.signature(generate_t0_checkpoints).parameters)
+        assert params == ["window_start", "window_end", "interval"]
+
+
+class TestCollectReplaySamples:
+    def test_checkpoints_without_a_prediction_are_counted_not_included(self, db_session):
+        _insert(db_session, 100, "platinum", T0 + dt.timedelta(hours=5), 40000)  # only after all checkpoints
+        checkpoints = [T0, T0 + dt.timedelta(hours=1)]
+
+        collection = collect_replay_samples(
+            db_session, 100, "platinum", checkpoints, window_days=7, horizon=dt.timedelta(hours=1)
+        )
+
+        assert collection.samples == []
+        assert collection.checkpoints_without_prediction == 2
+
+    def test_samples_with_missing_actual_are_still_included(self, db_session):
+        _insert(db_session, 100, "platinum", T0 - dt.timedelta(minutes=1), 40000)
+        checkpoints = [T0]  # no future observation exists at all -> forecast_error will be None
+
+        collection = collect_replay_samples(
+            db_session, 100, "platinum", checkpoints, window_days=7, horizon=dt.timedelta(hours=1)
+        )
+
+        assert len(collection.samples) == 1
+        assert collection.samples[0].forecast_error is None
+        assert collection.checkpoints_without_prediction == 0
+
+    def test_collects_one_sample_per_checkpoint_with_a_prediction(self, db_session):
+        for i in range(6):
+            _insert(db_session, 100, "platinum", T0 + dt.timedelta(hours=i), 40000 + i * 100)
+        checkpoints = generate_t0_checkpoints(T0, T0 + dt.timedelta(hours=4), dt.timedelta(hours=1))
+
+        collection = collect_replay_samples(
+            db_session, 100, "platinum", checkpoints, window_days=7, horizon=dt.timedelta(hours=1)
+        )
+
+        assert len(collection.samples) == len(checkpoints)
+        assert collection.checkpoints_without_prediction == 0

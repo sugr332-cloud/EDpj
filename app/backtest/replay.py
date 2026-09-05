@@ -201,3 +201,57 @@ def compare_windows(
         )
         for window_days in window_days_options
     }
+
+
+def generate_t0_checkpoints(
+    window_start: dt.datetime, window_end: dt.datetime, interval: dt.timedelta
+) -> list[dt.datetime]:
+    """T0 candidates at fixed `interval` steps from `window_start` up to
+    and including `window_end` -- deliberately NOT synced to observation
+    timestamps (docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md
+    §1): syncing to observations would only ever sample T0s where the
+    "latest observation at or before t0" has near-zero age, missing the
+    realistic range of prediction staleness that both 2-6B (volatility
+    class vs. forecast error) and 2-6C (freshness curve shape) need to
+    evaluate against. `window_start` itself is always included. Returns
+    an empty list for a non-positive `interval` or `window_start >
+    window_end` rather than looping forever or raising."""
+    if interval <= dt.timedelta(0) or window_start > window_end:
+        return []
+    checkpoints: list[dt.datetime] = []
+    t0 = window_start
+    while t0 <= window_end:
+        checkpoints.append(t0)
+        t0 += interval
+    return checkpoints
+
+
+@dataclass(frozen=True)
+class ReplaySampleCollection:
+    samples: list[ReplaySample]
+    checkpoints_without_prediction: int  # count of T0s where evaluate_forecast_at() returned None
+
+
+def collect_replay_samples(
+    session: Session,
+    station_id: int,
+    commodity_name: str,
+    checkpoints: list[dt.datetime],
+    window_days: int,
+    horizon: dt.timedelta,
+) -> ReplaySampleCollection:
+    """Thin loop over `evaluate_forecast_at` for each checkpoint. A T0
+    with no observation at or before it (evaluate_forecast_at returning
+    None) is counted but not included in `samples` -- distinct from a
+    ReplaySample whose `forecast_error` is None because no actual
+    observation was found (that sample IS included, since its
+    prediction still happened; see spec §1)."""
+    samples: list[ReplaySample] = []
+    checkpoints_without_prediction = 0
+    for t0 in checkpoints:
+        sample = evaluate_forecast_at(session, station_id, commodity_name, t0, window_days, horizon)
+        if sample is None:
+            checkpoints_without_prediction += 1
+        else:
+            samples.append(sample)
+    return ReplaySampleCollection(samples=samples, checkpoints_without_prediction=checkpoints_without_prediction)
