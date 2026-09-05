@@ -51,12 +51,25 @@ from app.journal import events as ev
 # point 5).
 MAX_MODEL_VALIDATION_TARGETS = 20
 
+# Activity gate for select_diverse_model_validation_targets() (spec §15.2)
+# -- how many times this commodity was reported that day, not how much
+# its price moved. An explicit placeholder, not a statistically derived
+# value.
+MIN_DISCOVERY_OBSERVATIONS = 3
+
+
+@dataclass(frozen=True)
+class CommodityDiscovery:
+    observation_count: int
+    latest_demand: int  # from the last matching row seen during the scan, "most recent wins" (same convention as MarketLatest)
+    latest_supply: int
+
 
 @dataclass(frozen=True)
 class StationDiscoveryResult:
     station_id: int
     discovery_date: dt.date
-    observation_counts: dict[str, int] = field(default_factory=dict)
+    commodities: dict[str, CommodityDiscovery] = field(default_factory=dict)
     # Empty dict = DISCOVERY_EMPTY: this station WAS scanned and
     # genuinely had zero EDDN reports on discovery_date -- distinct from
     # "never scanned" (no StationDiscoveryResult exists for it at all),
@@ -105,6 +118,7 @@ def discover_commodities_at_stations(
     spec §13.2 point 3)."""
     targets = set(station_ids)
     counts_by_station: dict[int, dict[str, int]] = {sid: {} for sid in targets}
+    latest_by_station: dict[int, dict[str, tuple[int, int]]] = {sid: {} for sid in targets}  # commodity -> (demand, supply)
     for envelope in iter_commodity_day(discovery_date, client):
         message = envelope.get("message")
         if not isinstance(message, dict):
@@ -117,10 +131,24 @@ def discover_commodities_at_stations(
         except MalformedEddnMessage:
             continue
         counts = counts_by_station[market_id]
+        latest = latest_by_station[market_id]
         for row in rows:
-            counts[row["commodity_name"]] = counts.get(row["commodity_name"], 0) + 1
+            name = row["commodity_name"]
+            counts[name] = counts.get(name, 0) + 1
+            latest[name] = (row["demand"], row.get("supply", 0))
     return [
-        StationDiscoveryResult(station_id=sid, discovery_date=discovery_date, observation_counts=counts_by_station[sid])
+        StationDiscoveryResult(
+            station_id=sid,
+            discovery_date=discovery_date,
+            commodities={
+                name: CommodityDiscovery(
+                    observation_count=count,
+                    latest_demand=latest_by_station[sid][name][0],
+                    latest_supply=latest_by_station[sid][name][1],
+                )
+                for name, count in counts_by_station[sid].items()
+            },
+        )
         for sid in station_ids
     ]
 
@@ -151,15 +179,89 @@ def select_model_validation_targets(
 
     candidates: list[ModelValidationTarget] = []
     for discovery in discoveries:
-        for commodity_name, count in discovery.observation_counts.items():
+        for commodity_name, info in discovery.commodities.items():
             candidates.append(
                 ModelValidationTarget(
-                    station_id=discovery.station_id, commodity_name=commodity_name, discovery_observation_count=count
+                    station_id=discovery.station_id,
+                    commodity_name=commodity_name,
+                    discovery_observation_count=info.observation_count,
                 )
             )
     candidates.sort(key=lambda t: (-t.discovery_observation_count, t.station_id, t.commodity_name))
 
     return candidates[:max_targets], discoveries
+
+
+def select_diverse_model_validation_targets(
+    session: Session,
+    client: StreamingHttpClient,
+    now: dt.datetime,
+    max_targets: int = MAX_MODEL_VALIDATION_TARGETS,
+    min_observations: int = MIN_DISCOVERY_OBSERVATIONS,
+) -> tuple[list[ModelValidationTarget], list[StationDiscoveryResult]]:
+    """Diverse Market Target Selection (spec §15) -- an alternative to
+    select_model_validation_targets() ("Baseline Selection", kept
+    unchanged and still the default for run_model_validation()). A real
+    5-target/14-day run using Baseline Selection found all 5 targets
+    landing on one station (its commodities dominate by sheer report
+    count), and 96.7% of forecast_error samples came back exactly zero
+    -- not because the model validated well, but because the selected
+    commodities were structurally near-static (supply=0 at that
+    station, meaning their sell_price is closer to a nominal meanPrice
+    than a real traded price).
+
+    This function takes only two axes, NEITHER of which is price/
+    volatility/forecast_error -- selecting on those would make target
+    selection depend on the very quantity 2-6B/2-6C are trying to
+    measure, a circular selection bias (spec §15.2):
+
+    1. Station diversity: round-robin across candidate stations, so one
+       high-traffic station can't fill the whole target list.
+    2. An activity gate that looks only at reporting frequency and
+       stock, never price: `observation_count >= min_observations`
+       (this commodity was reported often enough that day to have
+       real data, not a proxy for "prices moved a lot") and
+       `latest_supply > 0` (predict_naive_persistence() forecasts
+       `sell_price`, which is only meaningful when the station actually
+       stocks the commodity -- `demand` is kept on CommodityDiscovery
+       as a diagnostic but is NOT filtered on, since demand describes
+       buyer interest, not whether sell_price reflects real trade).
+
+    No randomness: round-robin is itself a deterministic stratification
+    (station_id ascending, then observation count descending /
+    commodity_name ascending as the within-station tie-break -- the same
+    secondary ordering Baseline Selection already uses), reproducible
+    without seed management."""
+    discovery_date = (now - dt.timedelta(days=1)).date()
+    discoveries = discover_commodities_at_stations(candidate_station_ids(session), discovery_date, client)
+
+    per_station_eligible: dict[int, list[ModelValidationTarget]] = {}
+    for discovery in discoveries:
+        eligible = [
+            ModelValidationTarget(discovery.station_id, name, info.observation_count)
+            for name, info in discovery.commodities.items()
+            if info.observation_count >= min_observations and info.latest_supply > 0
+        ]
+        eligible.sort(key=lambda t: (-t.discovery_observation_count, t.commodity_name))
+        per_station_eligible[discovery.station_id] = eligible
+
+    selected: list[ModelValidationTarget] = []
+    station_order = sorted(per_station_eligible)  # station_id ascending -- deterministic
+    round_index = 0
+    while len(selected) < max_targets:
+        added_this_round = False
+        for station_id in station_order:
+            candidates_for_station = per_station_eligible[station_id]
+            if round_index < len(candidates_for_station):
+                selected.append(candidates_for_station[round_index])
+                added_this_round = True
+                if len(selected) == max_targets:
+                    break
+        if not added_this_round:
+            break
+        round_index += 1
+
+    return selected, discoveries
 
 
 @dataclass(frozen=True)
@@ -184,12 +286,19 @@ def run_model_validation(
     t0_interval: dt.timedelta = EVALUATION_T0_INTERVAL,
     horizon: dt.timedelta = dt.timedelta(hours=1),
     max_targets: int = MAX_MODEL_VALIDATION_TARGETS,
+    select_targets_fn=select_model_validation_targets,
 ) -> ModelValidationReport:
     """Discovers targets (spec §13.2), then reuses the exact same
     fetch/sweep/pool/aggregate core Adoption Evaluation uses
     (compute_backtest_results) -- never calls decide_volatility_adoption()/
-    decide_freshness_adoption() (spec §13.3)."""
-    targets, discoveries = select_model_validation_targets(session, client, now, max_targets)
+    decide_freshness_adoption() (spec §13.3).
+
+    `select_targets_fn` defaults to select_model_validation_targets()
+    (Baseline Selection) so existing callers/results are unaffected;
+    pass select_diverse_model_validation_targets() explicitly to use
+    Diverse Market Target Selection instead (spec §15.5). Both share the
+    same (session, client, now, max_targets) call shape."""
+    targets, discoveries = select_targets_fn(session, client, now, max_targets)
     backtest_targets = [EvaluationTarget(t.station_id, t.commodity_name) for t in targets]
 
     backtest = compute_backtest_results(session, client, now, backtest_targets, window_days_options, t0_interval, horizon)

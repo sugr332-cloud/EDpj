@@ -1,7 +1,7 @@
 # EDpj Phase 2-6E Final Evaluation Implementation Baseline
 
 **Version:** 0.2
-**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。候補station複数件を1回のarchiveスキャンでまとめてdiscoveryする`discover_commodities_at_stations()`へ統合（当初案は候補station数だけ同じ日を重複取得していたため、実データ投入前に修正）。既存375テスト+新規14テスト=389。§14: 実データpilot（discovery）で5同一station targetが同一日付archiveを重複取得する非効率を実測発見、`app/market/predictability.py`に`ensure_days_fetched_batch()`を追加して修正（FetchLogのキー粒度は正しさのため変更せず、1回の呼び出し内でtarget横断のscanをまとめる設計）。既存389テスト+新規5テスト、計394テスト全通過。Exit Criteria全項目達成）
+**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。候補station複数件を1回のarchiveスキャンでまとめてdiscoveryする`discover_commodities_at_stations()`へ統合（当初案は候補station数だけ同じ日を重複取得していたため、実データ投入前に修正）。既存375テスト+新規14テスト=389。§14: 実データpilot（discovery）で5同一station targetが同一日付archiveを重複取得する非効率を実測発見、`app/market/predictability.py`に`ensure_days_fetched_batch()`を追加して修正（FetchLogのキー粒度は正しさのため変更せず、1回の呼び出し内でtarget横断のscanをまとめる設計）。既存389テスト+新規5テスト=394。§15: 実データ5×7/5×14 Runで、Baseline Selectionが同一station（Hoffman）へ集中し、forecast_error計算可能180件中96.7%が完全一致（誤差0）という縮退データになることを実測発見。station diversity（round-robin）とactivityフィルタ（observation_count/supply>0、価格・volatility_classは一切参照しない）による`select_diverse_model_validation_targets()`を追加、`run_model_validation()`に`select_targets_fn`を追加（デフォルトはBaseline Selectionのまま）。既存394テスト+新規9テスト、計403テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Revision note（v0.2、Evaluation Run #1の実行後に発覚した設計ギャップへの対応）**: Evaluation Run #1（実データ）で本人`MarketSnapshot(source='journal')`が0件であることが判明し、§1.1の「評価対象は本人のMarketSnapshotのみ」という設計が、「モデルが実データ上一般に妥当か」と「本人環境で採用してよいか」という2つの異なる問いを暗黙に1本化していたことが分かった。v0.2は§13を追加し、評価を**Adoption Evaluation**（本人MarketSnapshot起点、§7の採用手順の唯一の根拠）と**Model Validation**（実際にDockしたstationから発見した実在commodityが起点、採用判断には使わない）の二層に分離する。§1〜§12の既存決定（Adoption Evaluation側の設計）は変更していない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `51d55e9`）, `docs/PHASE_2_6C_FRESHNESS_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0c7d070`）, `docs/PHASE_2_6D_PLAYER_STATE_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0a1c279`）, `app/backtest/replay.py`, `app/backtest/volatility_evaluation.py`, `app/backtest/freshness_evaluation.py`, `app/backtest/journal_replay.py`, `app/market/predictability.py`, `app/scoring/confidence.py`
@@ -472,3 +472,109 @@ FetchLogへ(station_id, commodity_name, date)を記録
 - [x] `ensure_days_fetched()`（単一target版）が`ensure_days_fetched_batch()`と同じ結果を返す
 - [x] `compute_backtest_results()`（Adoption Evaluation/Model Validation共通コア）が新しいbatch版を使うよう更新されている
 - [x] 既存389テストに回帰がない（394テスト全通過）
+
+## 15. Diverse Market Target Selection（5×7/5×14実データRunで発見・v0.2内で追加）
+
+### 15.1 発見した問題（実測）
+
+5 target × 7日 / 5 target × 14日の実データRunで、`select_model_validation_targets()`（観測件数の多い順、以下**Baseline Selection**）が選ぶtargetが**常に同一station（Hoffman Installation）の異なるcommodity**に集中することが判明した。14日Runの結果、forecast_error計算可能な180件中**96.7%（174件）が完全一致（誤差0）**——STABLE/MODERATE/VOLATILEの3クラスのうちMODERATE/VOLATILEは1件も出現せず、Ordering仮説もFreshness単調性仮説も判定不能（構造的に縮退したデータでの見かけ上のTrue/Falseは実証にならない）のままだった。
+
+原因は、「観測件数（EDDN報告メッセージ数）」が「価格変動の大きさ」の代理指標になっていなかったこと。選ばれた5 commodityは`supply=0`（station在庫なし）の産業財が中心で、`sell_price`が実質的にmeanPrice由来の固定値に近く、そもそも変動しない銘柄だった。
+
+### 15.2 修正方針: 多様化 + 活性フィルタ（ボラティリティは選定基準に使わない）
+
+**やってはいけないこと（レビューで確定）**: 「価格変動が大きいcommodityを優先的に選ぶ」という基準は導入しない。これを導入すると、2-6B/2-6Cが検証しようとしている当のquantity（forecast error, volatility）で評価対象そのものを選ぶことになり、**「Volatility分類が効くcommodityだけを選んで、Volatility分類が効くことを確認した」**という循環に陥る。
+
+採用する2つの独立した軸：
+
+1. **Station diversity（station間の多様化）**: 候補station全体に対してround-robin方式で選定する。同一stationのcommodityだけでtarget枠を使い切らせない。
+
+2. **活性フィルタ（selection biasにならない、価格情報を見ない事前ゲート）**:
+   - `observation_count >= MIN_DISCOVERY_OBSERVATIONS`（discovery当日のEDDN報告回数。「報告頻度」であり「価格変動」ではない——報告回数が少ない=データが薄いという理由でのみ除外する）
+   - `latest_supply > 0`（該当stationがそのcommodityの在庫を持つ観測がある。naive persistenceが予測するのは`sell_price`であり、`supply=0`（station在庫なし）の場合`sell_price`はmeanPrice由来の名目値になりがちで、実売買を反映した価格変動を測る対象として弱いため。`demand`は診断情報として保持するが、フィルタ条件には使わない——`demand`は「買い手側の需要」であり`sell_price`の実勢を直接は左右しないため、フィルタとしての根拠が`supply`より弱い）
+
+いずれも**価格そのもの・価格変化・volatility_class・forecast_errorを一切参照しない**——観測回数と在庫有無という、市場の「活性」に関する事前情報のみを使う。
+
+### 15.3 選定アルゴリズム
+
+```text
+候補station（本人Docked、既存のcandidate_station_ids()を再利用）
+        ↓
+各stationについてdiscovery scan（既存のdiscover_commodities_at_stations()を拡張、§15.4）
+        ↓
+各stationごとに、活性フィルタを満たすcommodityのみ残す
+        ↓
+station内では観測件数の多い順・同数ならcommodity_name昇順（Baseline Selectionと同じ二次基準）
+        ↓
+station順（station_id昇順、決定論的）でround-robin
+   1周目: 各stationの1位を順番に採用
+   2周目: 各stationの2位を順番に採用
+   ...
+        ↓
+max_targets件に達するか、候補が尽きたら終了
+```
+
+ランダムサンプリングは使わない——round-robin自体が「station間で均等に配分する」という意味での層化を実現し、乱数シードの管理という新たな複雑さを持ち込まずに再現可能な決定論を維持する。
+
+### 15.4 Discovery出力の拡張（`observation_counts: dict[str,int]` → `commodities: dict[str, CommodityDiscovery]`）
+
+活性フィルタ（`latest_supply > 0`）を評価するには、discovery scan時点でdemand/supplyも保持する必要がある。
+
+```python
+@dataclass(frozen=True)
+class CommodityDiscovery:
+    observation_count: int
+    latest_demand: int
+    latest_supply: int
+
+
+@dataclass(frozen=True)
+class StationDiscoveryResult:
+    station_id: int
+    discovery_date: dt.date
+    commodities: dict[str, CommodityDiscovery] = field(default_factory=dict)
+    # 空dict = DISCOVERY_EMPTY（§13.2点3の意味を維持）
+```
+
+既存の`select_model_validation_targets()`（Baseline Selection）は`discovery.commodities[name].observation_count`を読むよう更新するのみで、**選定結果（挙動）自体は変更しない**——Baseline Selectionは既存2実データRun（5×7, 5×14）との比較対象として凍結・維持する。
+
+### 15.5 新設関数と呼び出し方
+
+```python
+MIN_DISCOVERY_OBSERVATIONS = 3  # 暫定値。活性フィルタの閾値であり、統計的根拠はない
+
+
+def select_diverse_model_validation_targets(
+    session: Session, client: StreamingHttpClient, now: dt.datetime,
+    max_targets: int = MAX_MODEL_VALIDATION_TARGETS,
+    min_observations: int = MIN_DISCOVERY_OBSERVATIONS,
+) -> tuple[list[ModelValidationTarget], list[StationDiscoveryResult]]:
+    """§15.2/§15.3。station diversityとactivityフィルタのみで選定し、
+    価格・volatility_class・forecast_errorを一切参照しない。"""
+```
+
+`run_model_validation()`は`select_targets_fn`パラメータ（デフォルト`select_model_validation_targets`、Baseline Selection）を受け取れるようにし、呼び出し側が`select_diverse_model_validation_targets`を明示的に渡せるようにする——デフォルト値を変えないことで既存の2実データRunの再現性を壊さない。
+
+### 15.6 次のステップ（本書のExitには含まない、実行は別ステップ）
+
+```text
+5 target × 7日（新Diverse Selection、station分散を確認）
+        ↓
+station/commodityの分散を確認（1 station集中にならないこと）
+        ↓
+5 target × 14日（STABLE/MODERATE/VOLATILEが分かれて出現するか確認）
+        ↓
+（十分なら）target数拡大 → 十分なcoverageが得られたら初めて30日
+```
+
+30日を必須にはしない——目的は「20 target集めること」ではなく「Volatility 3クラス・Freshness 8bucketを判定に足るサンプル数で観測すること」であり、それが少ないtarget数・短いwindowで得られるならそれ以上拡大しない。
+
+### 15.7 Exit Criteria
+
+- [x] `CommodityDiscovery`/`StationDiscoveryResult.commodities`が実装され、`discover_commodities_at_stations()`がdemand/supplyも保持する
+- [x] `select_model_validation_targets()`（Baseline Selection）の選定結果が変更前と一致する（回帰テスト）
+- [x] `select_diverse_model_validation_targets()`が価格・volatility_class・forecast_errorを一切参照しないことが構造的に保証されている（シグネチャに該当引数がない）
+- [x] station diversityがテストで検証されている（同一stationにtarget枠を独占されない）
+- [x] `latest_supply > 0`のフィルタが機能し、`supply=0`のcommodityが候補から除外されることがテストされている
+- [x] `run_model_validation()`が`select_targets_fn`で選定関数を差し替えられ、デフォルトはBaseline Selectionのまま
+- [x] 既存394テストに回帰がない

@@ -5,11 +5,13 @@ import datetime as dt
 
 from app.backtest.model_validation import (
     MAX_MODEL_VALIDATION_TARGETS,
+    MIN_DISCOVERY_OBSERVATIONS,
     ModelValidationReport,
     candidate_station_ids,
     discover_commodities_at_station,
     discover_commodities_at_stations,
     run_model_validation,
+    select_diverse_model_validation_targets,
     select_model_validation_targets,
 )
 from app.backtest.evaluation_run import EvaluationTarget
@@ -53,9 +55,9 @@ class TestCandidateStationIds:
 class TestDiscoverCommoditiesAtStation:
     def test_finds_commodities_reported_for_the_target_station(self):
         envelopes = [
-            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5}]),
-            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T14:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 3}]),
-            _envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T11:00:00Z", [{"name": "palladium", "sellPrice": 20000, "demand": 1}]),
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5, "stock": 10}]),
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T14:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 3, "stock": 0}]),
+            _envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T11:00:00Z", [{"name": "palladium", "sellPrice": 20000, "demand": 1, "stock": 4}]),
         ]
         client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
 
@@ -63,7 +65,24 @@ class TestDiscoverCommoditiesAtStation:
 
         assert result.station_id == 100
         assert result.discovery_date == DISCOVERY_DATE
-        assert result.observation_counts == {"platinum": 1, "gold": 1}  # station 200's palladium excluded
+        assert set(result.commodities) == {"platinum", "gold"}  # station 200's palladium excluded
+        assert result.commodities["platinum"].observation_count == 1
+        assert result.commodities["platinum"].latest_demand == 5
+        assert result.commodities["platinum"].latest_supply == 10
+        assert result.commodities["gold"].latest_supply == 0
+
+    def test_latest_demand_and_supply_win_over_earlier_observations(self):
+        envelopes = [
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5, "stock": 10}]),
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T14:00:00Z", [{"name": "platinum", "sellPrice": 41000, "demand": 9, "stock": 0}]),
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        result = discover_commodities_at_station(100, DISCOVERY_DATE, client)
+
+        assert result.commodities["platinum"].observation_count == 2
+        assert result.commodities["platinum"].latest_demand == 9  # the second (later) envelope wins
+        assert result.commodities["platinum"].latest_supply == 0
 
     def test_discovery_empty_when_station_never_reported(self):
         envelopes = [_envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 1}])]
@@ -71,14 +90,14 @@ class TestDiscoverCommoditiesAtStation:
 
         result = discover_commodities_at_station(100, DISCOVERY_DATE, client)
 
-        assert result.observation_counts == {}  # DISCOVERY_EMPTY, not an error
+        assert result.commodities == {}  # DISCOVERY_EMPTY, not an error
 
     def test_missing_archive_day_is_also_discovery_empty_not_an_error(self):
         client = FakeStreamingHttpClient({})  # 404 for every URL
 
         result = discover_commodities_at_station(100, DISCOVERY_DATE, client)
 
-        assert result.observation_counts == {}
+        assert result.commodities == {}
 
 
 class TestDiscoverCommoditiesAtStations:
@@ -93,7 +112,7 @@ class TestDiscoverCommoditiesAtStations:
         results = discover_commodities_at_stations([100, 200, 300], DISCOVERY_DATE, client)
 
         assert len(client.requested_urls) == 1  # one archive fetch, not one per station
-        assert [r.observation_counts for r in results] == [{"platinum": 1}, {"gold": 1}, {"silver": 1}]
+        assert [set(r.commodities) for r in results] == [{"platinum"}, {"gold"}, {"silver"}]
 
     def test_preserves_input_order_including_discovery_empty_stations(self):
         envelopes = [_envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 1}])]
@@ -102,9 +121,9 @@ class TestDiscoverCommoditiesAtStations:
         results = discover_commodities_at_stations([100, 200], DISCOVERY_DATE, client)
 
         assert results[0].station_id == 100
-        assert results[0].observation_counts == {}  # DISCOVERY_EMPTY
+        assert results[0].commodities == {}  # DISCOVERY_EMPTY
         assert results[1].station_id == 200
-        assert results[1].observation_counts == {"gold": 1}
+        assert set(results[1].commodities) == {"gold"}
 
 
 class TestSelectModelValidationTargets:
@@ -156,6 +175,98 @@ class TestSelectModelValidationTargets:
         assert (targets[1].station_id, targets[1].commodity_name) == (200, "zzz")
 
 
+class TestSelectDiverseModelValidationTargets:
+    def test_spreads_across_stations_instead_of_filling_from_one(self, db_session):
+        # Station 100 alone could fill max_targets with its own
+        # commodities; diverse selection must not let it.
+        _docked_event(db_session, 100, 1)
+        _docked_event(db_session, 200, 2)
+        envelopes = []
+        for i in range(4):
+            envelopes.append(
+                _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z", [{"name": f"c{i}", "sellPrice": 1, "demand": 1, "stock": 5}] * MIN_DISCOVERY_OBSERVATIONS)
+            )
+        envelopes.append(
+            _envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "d0", "sellPrice": 1, "demand": 1, "stock": 5}] * MIN_DISCOVERY_OBSERVATIONS)
+        )
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        targets, _ = select_diverse_model_validation_targets(db_session, client, NOW, max_targets=2)
+
+        stations = {t.station_id for t in targets}
+        assert stations == {100, 200}  # not both from 100
+
+    def test_excludes_commodities_below_min_observations(self, db_session):
+        _docked_event(db_session, 100, 1)
+        envelopes = [
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "rare", "sellPrice": 1, "demand": 1, "stock": 5}]),
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        targets, _ = select_diverse_model_validation_targets(db_session, client, NOW, min_observations=MIN_DISCOVERY_OBSERVATIONS)
+
+        assert targets == []  # only 1 observation, below MIN_DISCOVERY_OBSERVATIONS=3
+
+    def test_excludes_commodities_with_zero_supply(self, db_session):
+        _docked_event(db_session, 100, 1)
+        envelopes = [
+            _envelope(
+                100, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z",
+                [{"name": "noStock", "sellPrice": 1, "demand": 100, "stock": 0}],
+            )
+            for i in range(MIN_DISCOVERY_OBSERVATIONS)
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        targets, _ = select_diverse_model_validation_targets(db_session, client, NOW)
+
+        assert targets == []  # enough observations, but supply=0 -- excluded
+
+    def test_does_not_filter_on_demand(self, db_session):
+        # Demand is kept as a diagnostic on CommodityDiscovery but must
+        # never gate selection (spec §15.2) -- a commodity with
+        # demand=0 but supply>0 is still eligible.
+        _docked_event(db_session, 100, 1)
+        envelopes = [
+            _envelope(
+                100, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z",
+                [{"name": "noBuyers", "sellPrice": 1, "demand": 0, "stock": 5}],
+            )
+            for i in range(MIN_DISCOVERY_OBSERVATIONS)
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        targets, _ = select_diverse_model_validation_targets(db_session, client, NOW)
+
+        assert len(targets) == 1
+        assert targets[0].commodity_name == "noBuyers"
+
+    def test_deterministic_ordering_no_randomness(self, db_session):
+        _docked_event(db_session, 100, 1)
+        envelopes = [
+            _envelope(
+                100, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z",
+                [{"name": "aaa", "sellPrice": 1, "demand": 1, "stock": 5}, {"name": "bbb", "sellPrice": 1, "demand": 1, "stock": 5}],
+            )
+            for i in range(MIN_DISCOVERY_OBSERVATIONS)
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        first, _ = select_diverse_model_validation_targets(db_session, client, NOW)
+        second, _ = select_diverse_model_validation_targets(db_session, client, NOW)
+
+        assert first == second  # same result every time, no RNG
+
+    def test_signature_has_no_price_or_volatility_parameter(self):
+        # Structural guarantee (spec §15.2): selection must not be able
+        # to take price/volatility/forecast_error as an input, even by
+        # accident.
+        import inspect
+
+        params = set(inspect.signature(select_diverse_model_validation_targets).parameters)
+        assert params == {"session", "client", "now", "max_targets", "min_observations"}
+
+
 class TestRunModelValidation:
     def test_report_has_no_decision_field(self):
         # Structural guarantee (spec §13.3): Model Validation must never
@@ -195,3 +306,33 @@ class TestRunModelValidation:
         run_model_validation(db_session, client, NOW, window_days_options=(1,), t0_interval=dt.timedelta(hours=6))
 
         assert db_session.query(MarketPredictability).count() == 0
+
+    def test_default_select_targets_fn_is_baseline_selection(self):
+        import inspect
+
+        assert inspect.signature(run_model_validation).parameters["select_targets_fn"].default is select_model_validation_targets
+
+    def test_accepts_diverse_selection_as_select_targets_fn(self, db_session):
+        _docked_event(db_session, 100, 1)
+        _docked_event(db_session, 200, 2)
+        envelopes = [
+            _envelope(
+                100, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z",
+                [{"name": "platinum", "sellPrice": 40000, "demand": 5, "stock": 10}],
+            )
+            for i in range(MIN_DISCOVERY_OBSERVATIONS)
+        ] + [
+            _envelope(
+                200, f"{DISCOVERY_DATE:%Y-%m-%d}T1{i}:00:00Z",
+                [{"name": "gold", "sellPrice": 9000, "demand": 5, "stock": 10}],
+            )
+            for i in range(MIN_DISCOVERY_OBSERVATIONS)
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        report = run_model_validation(
+            db_session, client, NOW, window_days_options=(1,), t0_interval=dt.timedelta(hours=6),
+            select_targets_fn=select_diverse_model_validation_targets,
+        )
+
+        assert {t.station_id for t in report.targets} == {100, 200}
