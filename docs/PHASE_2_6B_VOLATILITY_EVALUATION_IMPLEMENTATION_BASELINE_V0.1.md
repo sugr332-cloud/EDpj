@@ -368,3 +368,49 @@ sweep_metric_thresholds()がいかなる自動採用判断（GO/NO_GO等）も�
 2. **§16.3 候補指標を4つに固定**: median（現行、比較用）/p95（primary）/nonzero_ratio（activity、別軸として維持）/max（diagnostic）
 3. **§16.4 評価コードは本番から完全独立**: `MarketPredictability`/`classify()`/`STABLE_MEDIAN_PRICE_CHANGE`等を一切参照しない新規モジュールとして実装する
 4. **§16.5 採用判定は本書に含まない**: `sweep_metric_thresholds()`は事実（分布・順序関係）を返すのみで、どの閾値を採用するかの決定は2-6E §7の手順に従う人間のレビュー
+
+## 17. 探索結果（中間結論、実データ20×7 Diverse Selection）
+
+**Status:** 探索段階の中間結論。閾値・指標の正式採用ではない。
+
+`docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md` §15のDiverse Selectorで選定した実データ20 target × 7日windowに`compute_metric_correlations()`/`sweep_metric_thresholds()`を適用した結果、以下を**確定してよい**。
+
+```text
+1. median_abs_price_changeよりp95_abs_price_changeの方がforecast errorとの
+   関係が強い（Spearman相関: median=0.806, p95=nonzero_ratio=max=0.941）
+2. p95_abs_price_changeの閾値(0.03, 0.09)で初めてSTABLE/MODERATE/VOLATILE
+   の3クラスが出現し、median forecast errorが 0 → 0.034 → 0.060 と
+   単調増加した
+3. ただしMODERATE(n=3)/VOLATILE(n=3)ともMIN_SAMPLES_FOR_EVALUATION=30に
+   遠く及ばず、ordering_holdsはNone（判定材料不足）のまま
+```
+
+**未確定のまま残すべきこと**:
+
+```text
+- (0.03, 0.09)という具体的な閾値ペアが「唯一の正解」なのか、
+  「p95≈0.03/0.09付近に分類境界が存在する」という近傍全体を指すのか
+- 別データセットでも同じ3クラス分離・単調増加パターンが再現するか
+- 3クラス（STABLE/MODERATE/VOLATILE）という現行の分類粒度自体が適切か、
+  それとも「STABLE vs 高変動」の2値分類の方が実データに合うか
+  （追加データでMODERATE区間にサンプルが集まらない場合に検討する）
+```
+
+### 17.1 次のステップ: 追加データでの再現性確認
+
+**Diverse Selectorの設計は変更しない**——p95が高いcommodityを優先選択するような変更は、2-6B自身が測ろうとしている量（forecast errorとp95の関係）でtarget選定を汚染する選択バイアスになる（§16.2の原則の直接的な帰結）。station diversity・activity filter（`MIN_DISCOVERY_OBSERVATIONS`/`latest_supply > 0`）による現行の`select_diverse_model_validation_targets()`をそのまま使う。
+
+**target数の上限に関する制約（実測）**: 本人の実Docked実績は現在3station（Gcobani/Hoffman/Ross Silo）のみで、そのうちactivityフィルタを満たすeligible commodityは合計30件（Hoffman 26 + Ross Silo 4 + Gcobani 0）——`max_targets`を50に設定しても、現在のcandidate stationプールでは30件で頭打ちになる。50件へ到達するには本人の実プレイでDocked stationを増やすか、`MIN_DISCOVERY_OBSERVATIONS`（現在3）を緩めるかのいずれかが必要——ただし後者は「活性フィルタを弱める」ことであり、「volatilityで選ぶ」こととは異なる別軸の変更である。まずは現在到達可能な30件で再評価する。
+
+再評価で確認する項目（§16.2〜16.4と同一の分析を30 targetで再実行）:
+
+```text
+1. 各classのsample数（class不均衡がどの程度緩和されるか）
+2. class別median/p95 forecast error
+3. Ordering hypothesis（ordering_holdsがTrue/Falseに determinateになるか）
+4. (0.03, 0.09)近傍の閾値ペアで結果が安定しているか
+   （0.025/0.075, 0.035/0.105等、近傍の閾値でも同様の3クラス分離が
+   得られるかを比較する）
+```
+
+この結果を見て、2-6E §7の採用判断（p95ベース分類を採用候補にするか、3クラスではなく2値分類を検討するか、あるいはさらなるデータ拡大が必要か）を次に決める。**本番のVolatility閾値（`STABLE_MEDIAN_PRICE_CHANGE`/`MODERATE_MEDIAN_PRICE_CHANGE`）はこの段階でも変更しない。**
