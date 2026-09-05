@@ -1,7 +1,7 @@
 # EDpj Phase 2-3 Horizon / Value Design Baseline
 
-**Version:** 0.3
-**Status:** Design Baseline Fixed（レビュー2巡目で4件の未決事項を確定、用語をvalue_calculableに統一。レビュー3巡目でRecommendation昇格条件→Score対象判定（is_scoreable）への呼称修正、§2の表現を「実装完了時点でもScore対象は現状0件」に修正）
+**Version:** 0.4
+**Status:** Design Baseline Fixed（レビュー2巡目で4件の未決事項を確定、用語をvalue_calculableに統一。レビュー3巡目でRecommendation昇格条件→Score対象判定（is_scoreable）への呼称修正。レビュー4巡目で実装直前の実データ検証により§4.3 Mining Continue Valueを全面修正——MiningRefinedに数量フィールドが存在しないこと、cargo capacityがLoadoutイベントから既存アーキテクチャのまま取得可能なこと、売却市場をeffective_price最大のmarketとして決定論的に選ぶことの3点を確定）
 **Date:** 2026-09-05
 **Depends on:** `IMPLEMENTATION_SPEC_V0.2.md` §10/§11/§12, `docs/PHASE_2_0_DESIGN_BASELINE_V0.1.md`, `docs/PHASE_2_2_CANDIDATE_GENERATION_DESIGN_BASELINE_V0.1.md`
 
@@ -59,7 +59,7 @@ Value計算の実装可能性を洗い出した結果、**Phase 2-3の範囲で�
 | Action | horizon_complete | value_calculable | 備考 |
 |---|---|---|---|
 | `mining_sell` | false (SC) | ✅ 可能 | 市場データは候補生成時点で必須のため既にある |
-| `mining_continue` | true | ⚠️ 要新規実装 | yield_model + cargo capacity取得（4.3節）が揃えばScore到達 |
+| `mining_continue` | true | ⚠️ 要新規実装 | commodity/quantityは確定、cargo capacityはLoadoutから取得可能。市場（demand>0）がある場合のみScore到達（4.3節） |
 | `mining_start` | false (SC) | ❌ Phase 2-3では実装しない | 4.4節で確定。将来Mining Start Value Modelとして別設計 |
 | `bio_current_body` | true | ❌ 不可能 | `organic_species`データ不在（5節） |
 | `bio_next_system` | false (SC) | ❌ 不可能 | 同上 |
@@ -104,25 +104,37 @@ value = Σ(quantity × effective_price)  # 保有commodityごとの合計
 
 `quantity`はCargoState、`effective_price`は4.1節。candidate生成時点で既にmarket dataが必須条件になっているため、value計算に必要な入力は既に揃っている。
 
-### 4.3 Mining Continue value（§10.3、yield_model新設が必要）
+### 4.3 Mining Continue value（§10.3、実装直前の実データ検証で全面修正）
+
+実装着手前に`MiningRefined`の実ペイロードとcargo capacityの取得可否を検証した結果、v0.3の前提が2点崩れていることが分かった。以下は検証を反映した確定版。
+
+**① `expected_mined_quantity`は統計モデルではなく確定値1.0。** 実際の`MiningRefined`イベントは`{"event": "MiningRefined", "Type": "$platinum_name;"}`の形で、**数量フィールドを持たない**——1イベント = 常に1tというゲーム仕様である（EDCD Journal manual系ドキュメントで確認）。したがって`app/mining/yield_model.py`はCalibration Engineのようなmedian推定を行わず、`EXPECTED_REFINED_QUANTITY_PER_EVENT = 1.0`という確定値を扱う。統計モデルを持ち込まないこと自体が「推測しない」方針の正しい適用である。
+
+**② 次の1tのcommodityは、現在の採掘セッションに属する直近`MiningRefined.Type`を使う。** `mining_continue`候補は既に`context.mining_active`（`DEFAULT_MINING_ACTIVE_LOOKBACK`以内に`MiningRefined`がある）の場合にのみ生成されるため（`app/mining/candidates.py`の`generate_mining_continue_candidates`）、「直近イベントが現在のセッションに属する」という条件は候補生成の時点で既に保証されている。Value計算はその同じイベントの`Type`（`_strip_internal_name`で正規化）を読むだけでよい。
+
+**③ cargo capacityは実は取得可能——Loadout解析が必要という前提が誤りだった。** Phase 0-Aのパーサ/extractor（`app/journal/parser.py`/`app/journal/extractor.py`）は**イベント種別を問わず全行をverbatimで`journal_events`に保存する**設計であり、`Loadout`イベントも例外ではない。実Journalの`Loadout`イベントはトップレベルに`CargoCapacity`（トン数の整数）を直接持つ（EDCD Journal manual系ドキュメントで確認）。したがって`app/mining/cargo_capacity.py`は「Loadout解析」という新機能ではなく、`journal_events`から`event_type='Loadout'`の最新行を取得し`payload["CargoCapacity"]`を読むだけの単純なクエリでよい。`Loadout`が一度も記録されていない場合のみ`None`（`CargoCapacity=0`は有効値であり`None`と区別する）。
+
+**④ 売却市場は、既知market中でeffective_priceが最大の1件を決定論的に選ぶ。** `mining_continue`候補自体は`target=ring`で市場を持たないため、値計算専用に「そのcommodityについて`demand > 0`の`MarketLatest`行の中から、§4.1のeffective_price計算式で最大値を出す1件」をvalue評価用の仮想的な売却先として選ぶ。**これは実際にそこへ移動するという意味ではなく**（移動時間はこのcandidateのhorizonに一切追加しない）、「観測済みmarketの中でモデル上もっとも高いeffective priceを使う」という決定論的な評価基準に過ぎない。既知marketが複数あるほどValueが計算不能になるという逆転現象を避けるため、複数一致時に計算を諦める設計は採用しない。
 
 ```text
-evaluation_cargo = min(current cargo + expected mined quantity, cargo capacity)
-expected_effective_sell_price = 満載時cargo/demand比率で計算したeffective price
-expected_value = expected_mined_quantity × expected_effective_sell_price
+evaluation_cargo = min(current cargo + 1.0, cargo capacity)
+best_market = 対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件
+expected_effective_sell_price = best_marketのeffective_price（§4.1）
+expected_value = 1.0 × expected_effective_sell_price
 ```
 
-`expected_mined_quantity`（1 mining cycleあたりの期待採掘量）は新規detector`app/mining/yield_model.py`が必要。**本人の過去`MiningRefined`実績から、1イベントあたりの平均refined量を統計的に推定する**方針とする（Calibration Engineのmedian方式を流用: `MiningRefined`イベントの`Type`別出現量から中央値を取る）。`cargo capacity`は船のcargo容量であり、**これも現状データソースがない**（Loadout解析が必要、§9.1のFSD rangeと同様に未実装）。
-
-**確定: cargo capacity不明時は保守的近似をせず、計算しない。** 「現在cargo量を上限として代用する」ことは「船の空き容量がゼロ」という全く別の仮定を持ち込むことになり、そこから`cargo/demand`比率・effective price・expected valueへと**推測がValue計算全体に伝播する**ため採用しない。
+**確定: 上記いずれかの入力が欠けても近似しない。** 判定順序は以下の通り（cargo capacityは`mining_active`が真である限りcommodityは常に確定しているため、実質的なチェックはcargo capacityとmarketの2つ）。
 
 ```text
-cargo capacity known   → expected_value を計算する
-cargo capacity unknown → expected_value = None
-                          value_unavailable_reason = "cargo_capacity_unknown"
+cargo capacity unknown（Loadout未記録）
+    → expected_value = None, value_unavailable_reason = "cargo_capacity_unknown"
+対象commodityにdemand>0のmarketが1件も存在しない
+    → expected_value = None, value_unavailable_reason = "no_market_target"
+両方満たす
+    → expected_value を計算する
 ```
 
-将来Loadout解析（cargo capacity取得）が実装された時点で、`mining_continue`は自動的にValue計算可能へ移行する。
+将来「売却先まで含めた移動時間を考慮するモデル」を導入する際も、この節の決定（市場選択は評価用であり移動は含まない）と衝突しない。
 
 ### 4.4 Mining Start value（§10.4、Phase 2-3では見送り）
 
@@ -193,7 +205,7 @@ Phase 2-4へ切り出す:
     confidence合成（Π(component_confidence) × freshness_factor、Phase 2-0で保留中）
 ```
 
-理由は2節の通り、実装完了時点でもScore到達可能性があるのは`mining_continue`（yield_model・cargo capacity取得の両方が揃って初めて到達する）のみであり、Rankingを今実装しても比較対象が実質1種類しかない可能性が高いため。
+理由は2節の通り、実装完了時点でもScore到達可能性があるのは`mining_continue`（対象commodityにdemand>0のmarketが存在する場合のみ到達する）のみであり、Rankingを今実装しても比較対象が実質1種類しかない可能性が高いため。
 
 Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`generation_confidence`をそのまま引き継ぐ暫定値のままとする（Phase 2-0/2-1で確定した最終合成式は未適用）。
 
@@ -202,7 +214,9 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 - [ ] `IncompleteCandidate`が`blocking_segments`/`value_unavailable_reason`の2軸で「不完全」を表現できる（用語は`value_calculable`で統一）
 - [ ] Score対象判定条件（`is_scoreable()`: `blocking_segments == [] AND expected_value is not None AND value_unavailable_reason is None`）が実装されている
 - [ ] Mining Sellのeffective price/valueが実装され、テストで検証されている
-- [ ] Mining Continueのyield_modelが実装され、cargo capacity不明時は`value_unavailable_reason="cargo_capacity_unknown"`で近似せず計算しないことがテストされている
+- [ ] `app/mining/yield_model.py`が`expected_mined_quantity=1.0`を確定値として扱い（統計モデルを持ち込まない）テストされている
+- [ ] `app/mining/cargo_capacity.py`が最新`Loadout`イベントの`CargoCapacity`を返し、`Loadout`未記録時のみ`None`（`cargo_capacity_unknown`）を返すことがテストされている
+- [ ] Mining Continueの売却市場が「対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件」として決定論的に選ばれ、該当marketが1件もない場合は`value_unavailable_reason="no_market_target"`となることがテストされている
 - [ ] Mining Startはvalue計算を実装せず、常に`value_unavailable_reason="not specified by §10.4 ..."`であることがテストされている
 - [ ] Bio 3種（current_body/next_system/return）すべてが`value_unavailable_reason="species value model not implemented"`で一貫していることがテストされている
 - [ ] `mining_sell`が「expected_valueは分かるがhorizonが不明」という状態でIncompleteCandidateとして保持され、値が失われないことがテストされている
@@ -215,5 +229,9 @@ Phase 2-3の`ActionCandidate.confidence`は、Phase 2-2までと同様に`genera
 2. **Mining Start value**: Phase 2-3では実装しない。独立した「Mining Start Value Model」として将来設計する
 3. **Bio Return value**: 近似しない。`unsold_bio_value`は実測値として取得不能（種価値モデルに依存するため）と判明し、Bio 3種すべてを`value_unavailable_reason="species value model not implemented"`で統一する
 4. **Score/Ranking境界**: `calculate_value()`/`calculate_score()`はPhase 2-3、`rank_candidates()`/`select_recommendation()`/`build_alternatives()`/confidence合成はPhase 2-4
+5. **（レビュー4巡目, 実装直前の実データ検証で追加）Mining Continueのexpected_mined_quantity**: `MiningRefined`に数量フィールドは存在せず、1イベント=1tの確定値。統計的yield modelは作らない
+6. **（同上）Mining Continueのcommodity**: `mining_active`判定に使われた直近`MiningRefined.Type`をそのまま使う（候補生成時点で「現在のセッションに属する」ことは既に保証されている）
+7. **（同上）Mining Continueのcargo capacity**: `journal_events`の最新`Loadout`イベントの`CargoCapacity`から取得可能（Loadout解析という新機能は不要、既存のverbatim保存アーキテクチャで既に取得できる）
+8. **（同上）Mining Continueの売却市場**: 対象commodityでdemand>0のMarketLatestのうちeffective_price最大の1件を、移動を伴わない評価専用の仮想売却先として決定論的に選ぶ。該当なしなら`value_unavailable_reason="no_market_target"`
 
 この4点の確定と、`value_calculable`への用語統一・Score対象判定条件（`is_scoreable()`）の明示（1節）をもって、本書はPhase 2-3実装のBaselineとして確定する。
