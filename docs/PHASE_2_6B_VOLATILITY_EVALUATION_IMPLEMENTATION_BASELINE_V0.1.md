@@ -1,9 +1,10 @@
 # EDpj Phase 2-6B Volatility Evaluation Implementation Baseline
 
-**Version:** 0.1
-**Status:** Implemented（`app/backtest/volatility_evaluation.py`新設、`app/backtest/replay.py`へ`generate_t0_checkpoints`/`collect_replay_samples`追加。既存308テスト+新規23テスト、計331テスト全通過。Exit Criteria全項目達成）
+**Version:** 0.2
+**Status:** Implemented（v0.1: `app/backtest/volatility_evaluation.py`新設、既存308テスト+新規23テスト=331。v0.2: Metric Selection & Threshold Sensitivity追加 — `app/backtest/volatility_metric_evaluation.py`新設。既存403テスト+新規17テスト、計420テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
-**Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §4/§8/§9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `app/backtest/replay.py`, `app/market/predictability.py`, `app/market/volatility.py`, `app/calibration/metrics.py`
+**Revision note（v0.2、実データ20×7 Model Validation Runで発見）**: `median_abs_price_change`（現行`classify()`の分類基準）が、隣接観測ペアの過半数が無変化の場合に構造的に0へ張り付くこと、およびforecast_errorとのSpearman相関がN=20で`median=0.806`に対し`p95_abs_price_change`/`nonzero_change_ratio`/`max_abs_price_change`が`0.90〜0.94`と有意に強いことを実測で発見した（`pair_n`単体は`-0.126`でほぼ無相関——観測数の多さが相関の交絡ではないことも確認済み）。v0.2は「p95をそのまま新閾値に採用する」のではなく、**指標選定→閾値感度分析→分類→forecast error評価**という評価プロセスそのものを追加する（§16）。§0〜§15の既存決定・既存関数（`classify()`, `aggregate_by_volatility_class()`, `evaluate_ordering_hypothesis()`, `MIN_SAMPLES_FOR_EVALUATION`等）は変更しない。
+**Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §4/§8/§9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `43f2604`、実データ20×7 Model Validation結果）, `app/backtest/replay.py`, `app/market/predictability.py`, `app/market/volatility.py`, `app/calibration/metrics.py`
 
 ## 0. スコープ
 
@@ -184,3 +185,186 @@ median_and_p95()の再利用によりp95計算ロジックが二重実装され�
 2. **§2 median/p95は`app.market.volatility.median_and_p95`を再利用**: `app.calibration.metrics.median_absolute_error`は「1予測値 vs 複数実測値」という別の形状のため使わない。二重実装を避けるため既存の`median_and_p95`（同じ「相対誤差の分布」形状）を採用
 3. **§3 閾値の再配置は2-6Bのスコープ外**: `evaluate_ordering_hypothesis`は現行閾値のもとでの事実（順序関係が成立するか、STABLE/VOLATILEがMAE_THRESHOLDのどちら側か）を報告するのみ。閾値変更の探索・実行は2-6E
 4. **§3 データ不足はNoneで表現**: `MIN_SAMPLES_FOR_EVALUATION`未満のclassは`False`ではなく`None`を返し、「順序不成立」と「判定不能」を混同しない
+
+## 16. Metric Selection & Threshold Sensitivity（v0.2で追加）
+
+### 16.1 発見した問題（実測）
+
+`docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md` §15のDiverse Selectorで得た実データ20×7 Model Validation Runで、`_compute_volatility_stats`の`median_abs_price_change`（現行`classify()`の分類基準）がHoffmanの16 targetすべてで**正確に0.00000**になった——隣接観測ペアの過半数が無変化（sell_priceが1件も動かない）の場合、中央値という統計量は構造的に0へ張り付く。
+
+同じデータでtargetごとのforecast_error（median）とのSpearman相関（N=20）を計測したところ：
+
+```text
+pair_n（生観測数）        -0.126  （ほぼ無相関 -- 観測数の多さが交絡ではないことの確認）
+zero_ratio                0.194  （弱い）
+median_abs_price_change   0.806  （現行の分類基準。構造的欠陥ありだが無相関ではない）
+nonzero_change_ratio      0.941
+p95_abs_price_change      0.941
+max_abs_price_change      0.941
+```
+
+Volatilityとforecast errorの関係自体は実在する（`pair_n`の無相関が交絡でないことを裏付ける）。ただし現行の`median_abs_price_change`はこの関係を捉える力が相対的に弱い。
+
+### 16.2 中心原則: 「p95が高相関だった」を即座に閾値へ採用しない
+
+**やってはいけないこと**: 「p95_abs_price_changeがforecast errorと相関した」という結果を、そのまま`STABLE_MEDIAN_PRICE_CHANGE`を`p95`ベースの値へ置き換える根拠にすることはしない。相関の確認と閾値の採用は別工程であり、混同すると「都合の良い指標を選んでから、その指標が効くことを確認しただけ」になる。
+
+v0.2で追加するのは**プロセスそのもの**である。
+
+```text
+16.1 指標評価（相関）    -- 済み。§16.1の表がその結果
+        ↓
+16.2 閾値感度分析        -- 候補閾値ごとに分類結果を機械的に生成
+        ↓
+16.3 Classification      -- 各閾値候補でのSTABLE/MODERATE/VOLATILE/INSUFFICIENT分布
+        ↓
+16.4 Forecast Error評価  -- 既存のevaluate_ordering_hypothesis()をそのまま再利用
+        ↓
+16.5 採用判定            -- 人間のレビュー。ここでもdecide_volatility_adoption()等の
+                            自動判定は行わない
+```
+
+この一連の処理は`app/market/predictability.py`の`classify()`/`STABLE_MEDIAN_PRICE_CHANGE`/`MODERATE_MEDIAN_PRICE_CHANGE`を一切参照・変更しない——本番の分類ロジックとは完全に独立した評価専用コードとして実装する（§0の「実装した閾値に合わせて分析する逆転を起こさない」原則の継続）。
+
+### 16.3 候補指標（固定）
+
+```text
+CANDIDATE_METRICS = (
+    "median_abs_price_change",  # 現行。比較対象として残す
+    "p95_abs_price_change",     # 第一候補（primary） -- 外れ値1件に引っ張られるmaxより頑健、
+                                 # medianの0張り付きを回避、相関0.941
+    "nonzero_change_ratio",     # 第二候補（activity） -- 「価格が変化する頻度」であり
+                                 # 変動の大きさそのものとは異なる概念、相関0.941
+    "max_abs_price_change",     # 診断用（diagnostic） -- 相関は強いが1回の異常値に敏感、
+                                 # 採用候補というよりp95の妥当性を確認する補助指標
+)
+```
+
+`nonzero_change_ratio`と`p95_abs_price_change`は意図的に別々の特徴量として評価する——前者は「変化の頻度」、後者は「変化の大きさ」であり、一つの指標に混ぜない。
+
+### 16.4 実装するコード（新設 `app/backtest/volatility_metric_evaluation.py`）
+
+```python
+@dataclass(frozen=True)
+class TargetMetrics:
+    station_id: int
+    commodity_name: str
+    pair_count: int
+    median_abs_price_change: float | None
+    p95_abs_price_change: float | None
+    nonzero_change_ratio: float | None
+    max_abs_price_change: float | None
+    forecast_error_median: float | None
+    forecast_error_sample_count: int
+
+
+def collect_target_metrics(
+    session: Session, targets: list[tuple[int, str]],
+    window_start: dt.datetime, now: dt.datetime,
+    checkpoints: list[dt.datetime], window_days: int, horizon: dt.timedelta,
+) -> tuple[list[TargetMetrics], dict[tuple[int, str], list[ReplaySample]]]:
+    """targetごとにMarketHistoricalObservationを読み、
+    app.market.volatility.pair_observations/price_change_ratioを再利用して
+    4指標を計算する（app.market.predictability._compute_volatility_statsは
+    呼ばない -- MarketPredictabilityへの依存を作らず、評価コードを本番から
+    完全に独立させる）。collect_replay_samples()の結果もtargetごとに返す
+    -- §16.2のsweep_metric_thresholds()がcheckpoint単位の再分類に
+    再利用するため、二重にサンプル収集しない。"""
+
+
+def spearman_correlation(xs: list[float], ys: list[float]) -> float | None:
+    """依存追加を避けるための素朴な実装（順位変換 + statistics.correlation）。
+    4件未満はNone -- 暫定的な最小件数であり統計的根拠はない。"""
+
+
+def compute_metric_correlations(target_metrics: list[TargetMetrics]) -> dict[str, float | None]:
+    """§16.1の表を再現可能にする。診断のみ、指標選定の自動判断は行わない。"""
+
+
+def classify_by_metric(
+    value: float | None, sample_count: int,
+    stable_threshold: float, moderate_threshold: float,
+    min_samples: int = MIN_SAMPLES_FOR_CLASSIFICATION,
+) -> VolatilityClass:
+    """app.market.predictability.classify()の汎用版。任意の指標値・
+    閾値ペアを受け取る。本番コードからは一切呼ばれない。"""
+
+
+@dataclass(frozen=True)
+class ThresholdSweepResult:
+    metric_name: str
+    stable_threshold: float
+    moderate_threshold: float
+    class_stats: dict[VolatilityClass, ClassForecastErrorStats]  # 2-6Bの既存型をそのまま再利用
+    ordering: OrderingHypothesisResult  # evaluate_ordering_hypothesis()をそのまま再利用
+
+
+def sweep_metric_thresholds(
+    target_metrics: list[TargetMetrics],
+    samples_by_target: dict[tuple[int, str], list[ReplaySample]],
+    metric_name: str,
+    threshold_candidates: list[tuple[float, float]],
+    min_samples: int = MIN_SAMPLES_FOR_CLASSIFICATION,
+) -> list[ThresholdSweepResult]:
+    """§16.2/16.3/16.4。各(stable_threshold, moderate_threshold)候補について、
+    targetをclassify_by_metric()で再分類し、そのtargetに属する
+    ReplaySampleのforecast_errorをまとめてclass別に集計する
+    （checkpoint単位の粒度を保つ -- targetの中央値だけを比較するより
+    統計的に妥当）。集計結果はapp.market.volatility.median_and_p95で
+    計算し、evaluate_ordering_hypothesis()（2-6Bの既存関数、無改変）へ
+    そのまま渡す。決定は行わない -- 結果はThresholdSweepResultのリストとして
+    返すのみで、どの閾値を採用するかの自動判断はしない（§16.5）。"""
+```
+
+**閾値候補の初期セット（暫定、統計的根拠なし）**: `p95_abs_price_change`について、現行閾値の比（STABLE:MODERATE = 1:3）を維持しつつ、
+
+```text
+STABLE_THRESHOLD_CANDIDATES = [0.01, 0.02, 0.03, 0.05, 0.10]
+# 対応するMODERATE_THRESHOLDは3倍: [0.03, 0.06, 0.09, 0.15, 0.30]
+```
+
+### 16.5 採用判定は本書のスコープ外
+
+`sweep_metric_thresholds()`の出力は、どの`(metric, threshold)`が「良い」かを機械的に選ばない。`ThresholdSweepResult`のリストを人間がレビューし、
+
+- 各class（STABLE/MODERATE/VOLATILE）に`MIN_SAMPLES_FOR_EVALUATION`以上のサンプルがあるか
+- `ordering.ordering_holds`が実際にTrueになるか
+- class間でmedian forecast errorが単調に悪化するか
+
+を確認したうえで、`docs/PHASE_2_6E_FINAL_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md` §7の採用手順（独立したレビュー可能コミット）に従って初めて本番定数を検討する。本書のExitはこの採用判断自体を含まない。
+
+### 16.6 Acceptance Tests
+
+```text
+collect_target_metrics()がpair_observations/price_change_ratioを再利用し、
+   独自の価格ペアリングロジックを持たない
+collect_target_metrics()がMarketPredictability/app.market.predictability.classify()を
+   一切参照しない（構造的保証）
+spearman_correlation()が4件未満の入力でNoneを返す
+compute_metric_correlations()がCANDIDATE_METRICSの4指標全てについて相関を返す
+classify_by_metric()がsample_count不足時にINSUFFICIENTを返す
+   （thresholdの値に関わらず）
+sweep_metric_thresholds()が閾値候補ごとに独立したThresholdSweepResultを返す
+sweep_metric_thresholds()がevaluate_ordering_hypothesis()を無改変で呼んでいる
+   （二重実装がないことの参照テスト）
+sweep_metric_thresholds()がapp.market.predictability.STABLE_MEDIAN_PRICE_CHANGE等の
+   本番定数を一切参照しない（構造的保証）
+sweep_metric_thresholds()がいかなる自動採用判断（GO/NO_GO等）も返さない
+   （ThresholdSweepResultに*_decisionフィールドが存在しない）
+```
+
+### 16.7 Exit Criteria
+
+- [x] `app/backtest/volatility_metric_evaluation.py`が新設され、`TargetMetrics`/`collect_target_metrics`/`spearman_correlation`/`compute_metric_correlations`/`classify_by_metric`/`ThresholdSweepResult`/`sweep_metric_thresholds`が実装されている
+- [x] 4指標（median/p95/nonzero_ratio/max）すべてが`app.market.volatility`の既存関数（`pair_observations`/`price_change_ratio`/`median_and_p95`）を再利用し、価格ペアリングロジックを二重実装していない
+- [x] `classify_by_metric()`/`sweep_metric_thresholds()`が`app.market.predictability`の本番定数・`classify()`を一切参照しないことが構造的に保証されている
+- [x] `sweep_metric_thresholds()`が`evaluate_ordering_hypothesis()`を無改変で再利用している
+- [x] 採用判定（GO/NO_GO相当の自動判断）を返す関数が存在しないことが構造的に保証されている
+- [x] 既存403テストに回帰がない
+
+### 16.8 決定事項サマリ
+
+1. **§16.1 相関確認と閾値採用は別工程**: p95等の高相関を即座に新閾値へ採用しない。指標選定→閾値感度分析→分類→forecast error評価というプロセス自体を追加する
+2. **§16.3 候補指標を4つに固定**: median（現行、比較用）/p95（primary）/nonzero_ratio（activity、別軸として維持）/max（diagnostic）
+3. **§16.4 評価コードは本番から完全独立**: `MarketPredictability`/`classify()`/`STABLE_MEDIAN_PRICE_CHANGE`等を一切参照しない新規モジュールとして実装する
+4. **§16.5 採用判定は本書に含まない**: `sweep_metric_thresholds()`は事実（分布・順序関係）を返すのみで、どの閾値を採用するかの決定は2-6E §7の手順に従う人間のレビュー
