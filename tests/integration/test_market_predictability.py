@@ -75,6 +75,40 @@ class TestAnalyzeMarket:
         assert result.volatility_class == "INSUFFICIENT"
 
 
+class TestComputeVolatilityStatsRefactor:
+    def test_analyze_market_result_matches_direct_compute_volatility_stats(self, db_session):
+        # Phase 2-6A extracted analyze_market()'s calculation into
+        # _compute_volatility_stats() (docs/PHASE_2_6A... §2.1) so
+        # app/backtest/replay.py's compare_windows() can reuse the exact
+        # same classification logic without persisting. This proves the
+        # extraction didn't change analyze_market()'s persisted result.
+        from app.market.predictability import _compute_volatility_stats
+
+        payloads = _payloads_for_window(100, "platinum", window_days=2, now=NOW, prices=[40000, 44586, 42000])
+        client = FakeStreamingHttpClient(payloads)
+
+        persisted = analyze_market(
+            db_session, station_id=100, commodity_name="platinum", client=client, window_days=2, now=NOW
+        )
+
+        direct = _compute_volatility_stats(
+            db_session,
+            station_id=100,
+            commodity_name="platinum",
+            window_start=NOW - dt.timedelta(days=2),
+            now=NOW,
+        )
+
+        assert persisted.sample_count == direct.sample_count
+        assert persisted.median_abs_price_change == direct.median_abs_price_change
+        assert persisted.p95_abs_price_change == direct.p95_abs_price_change
+        assert persisted.median_abs_demand_change == direct.median_abs_demand_change
+        assert persisted.p95_abs_demand_change == direct.p95_abs_demand_change
+        assert persisted.median_observation_gap_seconds == direct.median_observation_gap_seconds
+        assert persisted.p95_observation_gap_seconds == direct.p95_observation_gap_seconds
+        assert persisted.volatility_class == direct.volatility_class
+
+
 class TestGetPredictability:
     def test_returns_none_when_never_analyzed(self, db_session):
         assert get_predictability(db_session, station_id=100, commodity_name="platinum") is None

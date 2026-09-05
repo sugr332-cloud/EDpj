@@ -14,6 +14,7 @@ testable; they are not the final calibrated values.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -50,7 +51,7 @@ def classify(sample_count: int, median_abs_price_change: float | None) -> Volati
     return "VOLATILE"
 
 
-def _ensure_days_fetched(
+def ensure_days_fetched(
     session: Session,
     station_id: int,
     commodity_name: str,
@@ -94,28 +95,34 @@ def _ensure_days_fetched(
         session.commit()
 
 
-def analyze_market(
-    session: Session,
-    station_id: int,
-    commodity_name: str,
-    client: StreamingHttpClient,
-    window_days: int = DEFAULT_ANALYSIS_WINDOW_DAYS,
-    now: dt.datetime | None = None,
-) -> MarketPredictability:
-    """Ensures the analysis window is cached locally (fetching only
-    missing days from the archive), then computes volatility/gap
-    statistics and persists one MarketPredictability row. Does not decide
-    whether/how a caller uses `volatility_class` -- that wiring into
-    Value calculation is Phase 2-5B/C (§0)."""
-    now = now or dt.datetime.now(dt.timezone.utc)
-    window_start = now - dt.timedelta(days=window_days)
+@dataclass(frozen=True)
+class VolatilityComputation:
+    """The computed part of a MarketPredictability row, without any of
+    the identity/bookkeeping columns (station_id, commodity_name,
+    window_start, window_end, model_version, computed_at) -- those are
+    caller concerns (who is asking, for which window), not part of the
+    statistics themselves. Read-only: producing this never writes to the
+    database (docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md
+    §2.1) -- both `analyze_market` (persists) and
+    `app.backtest.replay.compare_windows` (does not) build on top of it."""
 
-    dates = [
-        (window_start + dt.timedelta(days=offset)).date()
-        for offset in range((now.date() - window_start.date()).days + 1)
-    ]
-    _ensure_days_fetched(session, station_id, commodity_name, dates, client)
+    sample_count: int
+    median_abs_price_change: float | None
+    p95_abs_price_change: float | None
+    median_abs_demand_change: float | None
+    p95_abs_demand_change: float | None
+    median_observation_gap_seconds: float | None
+    p95_observation_gap_seconds: float | None
+    volatility_class: VolatilityClass
 
+
+def _compute_volatility_stats(
+    session: Session, station_id: int, commodity_name: str, window_start: dt.datetime, now: dt.datetime
+) -> VolatilityComputation:
+    """Reads whatever MarketHistoricalObservation rows are already cached
+    in `[window_start, now]` and computes volatility/gap statistics --
+    does not fetch anything itself (the caller decides whether/how to
+    ensure the window is cached first, e.g. via `ensure_days_fetched`)."""
     rows = (
         session.query(MarketHistoricalObservation)
         .filter_by(station_id=station_id, commodity_name=commodity_name)
@@ -141,7 +148,41 @@ def analyze_market(
     gap_seconds = [gap.total_seconds() for gap in all_gaps]
     median_gap, p95_gap = median_and_p95(gap_seconds)
 
-    volatility_class = classify(len(observations), median_price)
+    return VolatilityComputation(
+        sample_count=len(observations),
+        median_abs_price_change=median_price,
+        p95_abs_price_change=p95_price,
+        median_abs_demand_change=median_demand,
+        p95_abs_demand_change=p95_demand,
+        median_observation_gap_seconds=median_gap,
+        p95_observation_gap_seconds=p95_gap,
+        volatility_class=classify(len(observations), median_price),
+    )
+
+
+def analyze_market(
+    session: Session,
+    station_id: int,
+    commodity_name: str,
+    client: StreamingHttpClient,
+    window_days: int = DEFAULT_ANALYSIS_WINDOW_DAYS,
+    now: dt.datetime | None = None,
+) -> MarketPredictability:
+    """Ensures the analysis window is cached locally (fetching only
+    missing days from the archive), then computes volatility/gap
+    statistics and persists one MarketPredictability row. Does not decide
+    whether/how a caller uses `volatility_class` -- that wiring into
+    Value calculation is Phase 2-5B/C (§0)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    window_start = now - dt.timedelta(days=window_days)
+
+    dates = [
+        (window_start + dt.timedelta(days=offset)).date()
+        for offset in range((now.date() - window_start.date()).days + 1)
+    ]
+    ensure_days_fetched(session, station_id, commodity_name, dates, client)
+
+    computation = _compute_volatility_stats(session, station_id, commodity_name, window_start, now)
 
     # Upsert, not insert: docs/PHASE_2_5A... §3 treats this as a
     # re-computable derived result, not an append-only log -- re-running
@@ -157,16 +198,16 @@ def analyze_market(
             {
                 "station_id": station_id,
                 "commodity_name": commodity_name,
-                "sample_count": len(observations),
+                "sample_count": computation.sample_count,
                 "window_start": window_start,
                 "window_end": now,
-                "median_abs_price_change": median_price,
-                "p95_abs_price_change": p95_price,
-                "median_abs_demand_change": median_demand,
-                "p95_abs_demand_change": p95_demand,
-                "median_observation_gap_seconds": median_gap,
-                "p95_observation_gap_seconds": p95_gap,
-                "volatility_class": volatility_class,
+                "median_abs_price_change": computation.median_abs_price_change,
+                "p95_abs_price_change": computation.p95_abs_price_change,
+                "median_abs_demand_change": computation.median_abs_demand_change,
+                "p95_abs_demand_change": computation.p95_abs_demand_change,
+                "median_observation_gap_seconds": computation.median_observation_gap_seconds,
+                "p95_observation_gap_seconds": computation.p95_observation_gap_seconds,
+                "volatility_class": computation.volatility_class,
                 "model_version": MODEL_VERSION,
                 "computed_at": now,
             }
