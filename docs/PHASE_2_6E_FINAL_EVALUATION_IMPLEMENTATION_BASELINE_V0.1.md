@@ -1,8 +1,9 @@
 # EDpj Phase 2-6E Final Evaluation Implementation Baseline
 
-**Version:** 0.1
-**Status:** Implemented（`app/backtest/evaluation_run.py`新設。既存360テスト+新規15テスト、計375テスト全通過。Exit Criteria全項目達成。実archive/実Journalへの接続はまだ行っていない — 次の実行ステップで別途行う）
+**Version:** 0.2
+**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。既存375テスト+新規12テスト、計387テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
+**Revision note（v0.2、Evaluation Run #1の実行後に発覚した設計ギャップへの対応）**: Evaluation Run #1（実データ）で本人`MarketSnapshot(source='journal')`が0件であることが判明し、§1.1の「評価対象は本人のMarketSnapshotのみ」という設計が、「モデルが実データ上一般に妥当か」と「本人環境で採用してよいか」という2つの異なる問いを暗黙に1本化していたことが分かった。v0.2は§13を追加し、評価を**Adoption Evaluation**（本人MarketSnapshot起点、§7の採用手順の唯一の根拠）と**Model Validation**（実際にDockしたstationから発見した実在commodityが起点、採用判断には使わない）の二層に分離する。§1〜§12の既存決定（Adoption Evaluation側の設計）は変更していない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `51d55e9`）, `docs/PHASE_2_6C_FRESHNESS_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0c7d070`）, `docs/PHASE_2_6D_PLAYER_STATE_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0a1c279`）, `app/backtest/replay.py`, `app/backtest/volatility_evaluation.py`, `app/backtest/freshness_evaluation.py`, `app/backtest/journal_replay.py`, `app/market/predictability.py`, `app/scoring/confidence.py`
 
 ## 0. 位置づけ
@@ -337,6 +338,19 @@ decide_volatility_adoption()/decide_freshness_adoption()がordering_holds/
    （不成立と判定不能を混同しない）
 EvaluationRunReport.target_sample_countsが各targetの実際のReplaySample数と一致する
    （特定targetへの偏りが最終レポートから確認できることのテスト）
+compute_backtest_results()の抽出前後でrun_evaluation()の結果が変化しない
+   （リファクタの回帰保証）
+candidate_station_ids()がDocked以外のevent_typeを無視し、MarketIDのdistinct集合を返す
+discover_commodities_at_station()が対象station_id以外のmarketIdを無視する
+discover_commodities_at_station()が対象日にEDDN報告が1件もない場合、
+   observation_counts={}（DISCOVERY_EMPTY）を返し、例外を投げない
+select_model_validation_targets()が観測件数の多い順、同数なら
+   (station_id, commodity_name)昇順で決定的にソートする
+select_model_validation_targets()がmax_targets件を超えて候補を返さない
+run_model_validation()がdecide_volatility_adoption()/decide_freshness_adoption()を
+   一切呼ばない（構造的保証 -- ModelValidationReportに*_decisionフィールドが存在しない）
+run_model_validation()もrun_evaluation()と同じくpredictability.py/confidence.pyの
+   定数を書き換えない
 ```
 
 ## 11. Exit Criteria
@@ -350,6 +364,11 @@ EvaluationRunReport.target_sample_countsが各targetの実際のReplaySample数�
 - [x] `EvaluationRunReport.target_sample_counts`でtarget単位の内訳が確認できる
 - [x] Fakeクライアント・合成データのみでテストが完結し、実archive/実Journalへのアクセスがないことが確認されている
 - [x] 既存360テストに回帰がない
+- [x] （v0.2）`compute_backtest_results()`が`evaluation_run.py`から抽出され、`run_evaluation()`の結果に回帰がない
+- [x] （v0.2）`app/backtest/model_validation.py`が新設され、`candidate_station_ids`/`discover_commodities_at_station`/`select_model_validation_targets`/`run_model_validation`/`ModelValidationReport`が実装されている
+- [x] （v0.2）`ModelValidationReport`に`*_decision`フィールドが存在せず、`run_model_validation()`が`decide_*_adoption()`を一切呼ばないことが構造的に保証されている
+- [x] （v0.2）discovery scanでcommodity 0件のstationが`DISCOVERY_EMPTY`として明示的に記録され、未スキャンと区別される
+- [x] （v0.2）target選定が観測件数降順・`(station_id, commodity_name)`昇順タイブレークで決定的である
 - [ ] 本書がpushされた後で初めて、実EDDN archive・実Journalへの接続を伴う評価実行に進む（本書のExit自体はこの実行を含まない）
 
 ## 12. 決定事項サマリ
@@ -363,3 +382,49 @@ EvaluationRunReport.target_sample_countsが各targetの実際のReplaySample数�
 7. **§7 採用は常に独立したレビュー可能なコミット**: 評価実行コードが定数を自動書き換えすることは一切ない
 8. **§0.1 現在値を正解として扱わない（レビュー指摘）**: `decide_volatility_adoption()`/`decide_freshness_adoption()`は評価結果のみを入力とし、現在の定数値を一切参照しない。これを「現在の分類/curveが実データ上誤りであるように作ったfixtureでNO_GOを返す」というテストで直接証明する
 9. **§9 target単位の内訳を保持（レビュー指摘）**: `EvaluationRunReport.target_sample_counts`で、pooling後も特定targetへのサンプル偏りを確認できるようにする
+
+## 13. Model Validation Track（v0.2で追加）
+
+### 13.1 二層構造の確定
+
+Evaluation Run #1（実データ）で本人`MarketSnapshot(source='journal')`が0件となり、§1.1の設計のままでは「モデルが実データ上一般に妥当か」を検証する手段自体が失われることが判明した。これを受け、評価を2つの独立したトラックに分離する。
+
+```text
+Adoption Evaluation（既存、app/backtest/evaluation_run.py）
+  対象: 本人MarketSnapshot(source='journal')のみ（§1.1、変更なし）
+  問い: 本人の実市場に採用してよいか
+  結果: decide_volatility_adoption()/decide_freshness_adoption()の
+        GO/CONDITIONAL_GO/NO_GO/INSUFFICIENT
+  → §7の採用手順（本番定数変更）の唯一の根拠になりうる
+
+Model Validation（新設、app/backtest/model_validation.py）
+  対象: 実際にDockした実在station_idから発見したcommodity（§13.2）
+  問い: モデル（classify()の順序仮説、freshness curveの単調性）は
+        実データ上そもそも成立するか
+  結果: OrderingHypothesisResult/FreshnessMonotonicityResultをそのまま報告
+  → decide_*_adoption()を一切呼ばない。ModelValidationReportに
+    *_decision フィールドは存在しない（構造的保証）。
+    §7の採用手順の根拠には絶対に使わない（§13.3）。
+```
+
+両トラックは`compute_backtest_results()`（`evaluation_run.py`から抽出した共有コア、fetch/sweep/pool/aggregate）を共通利用する。差異は「対象の選び方」と「結果をdecide_*_adoption()にかけるかどうか」のみであり、統計ロジックの二重実装はない。
+
+### 13.2 Target発見方式（2段階発見、5点固定）
+
+`Station`（Spanshの静的データ、未インポート）にも、EDDN archiveそのものにも「どのstationが何のcommodityを取引するか」という索引は存在しない。したがって実際のEDDN観測から発見する以外に方法がない。
+
+1. **候補station**: 本人の実Journalで実際にDockした`station_id`（`JournalEvent(event_type=Docked)`のMarketIDのdistinct集合、`candidate_station_ids()`）。これらは（EDDN報告の有無に関わらず）確実に実在する有効なMarketIDである。
+
+2. **Discovery scan対象期間**: 候補stationごとに、**1日分のみ**（`discovery_date = (now - 1日).date()`）をarchiveからフルスキャンする（`discover_commodities_at_station()`）。「今日」はまだarchive化されていない可能性があるため（`docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md` §4、`iter_commodity_day`は未生成日を0件として返す）、1日前を使う。
+
+3. **commodity 0件の扱い**: スキャンした候補stationがその日EDDNへ一切報告されなかった場合、`StationDiscoveryResult(observation_counts={})`として明示的に記録する（`app.market.predictability.MarketHistoricalFetchLog`と同じ「0件」と「未スキャン」を区別する設計）。空dictは「そのstationは取引がない」ではなく「その日の EDDN報告がなかった」という意味であり、target候補から自然に除外されるが、`ModelValidationReport.station_discoveries`には必ず残る。
+
+4. **target選定順位**: 発見された`(station_id, commodity_name)`を、discovery日の観測件数（`discovery_observation_count`）の多い順に並べる。同数の場合は`(station_id昇順, commodity_name昇順)`で決定的にタイブレークする——後から都合よく選び直せない、再現可能な順序。
+
+5. **`MAX_MODEL_VALIDATION_TARGETS = 20`**: `MAX_EVALUATION_TARGETS`と同じ値・同じ根拠（archive取得コスト、`docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md` §1）を採用する。概念としては独立した定数（将来どちらかだけ変更する可能性があるため2つ目の定数として持つ）だが、コスト制約の大きさが変わる理由はないため、初期値は同じにする。
+
+### 13.3 Model Validationの結果と§7の関係
+
+Model Validationの結果（構造的妥当性がGO相当であっても）は、**§7の採用手順を一切トリガーしない**。Model Validationの対象は「本人が実際に見る市場」ではなく「発見できた実在の市場」であり、モデルが実データ上一般に成立することと、本人の実際のRecommendationにその閾値を適用してよいことは別の主張である（§0.1の原則の直接的な帰結）。
+
+Model Validationが確認（または反証）するのは、2-6B/2-6Cが検証しようとしている統計的仮説（volatility_classとforecast errorの順序関係、age_at_t0とforecast errorの単調性）が実データ一般で観測できるかどうかであり、これはAdoption Evaluationが本人データ不足で長期間INSUFFICIENTのままであっても、モデル自体の設計を継続して検証・改善するための独立した材料になる。

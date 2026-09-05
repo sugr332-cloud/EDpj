@@ -169,7 +169,14 @@ class EvaluationRunReport:
     journal_coverage: JournalCoverageReport
 
 
-def run_evaluation(
+@dataclass(frozen=True)
+class BacktestResults:
+    volatility_by_window: dict[int, OrderingHypothesisResult]
+    freshness: FreshnessMonotonicityResult
+    target_sample_counts: dict[EvaluationTarget, int]
+
+
+def compute_backtest_results(
     session: Session,
     client: StreamingHttpClient,
     now: dt.datetime,
@@ -177,12 +184,15 @@ def run_evaluation(
     window_days_options: tuple[int, ...] = (7, 14, 30),
     t0_interval: dt.timedelta = EVALUATION_T0_INTERVAL,
     horizon: dt.timedelta = dt.timedelta(hours=1),
-) -> EvaluationRunReport:
-    """Orchestrates spec §1-§6. No new statistical logic -- every number
-    comes from an existing 2-6A-D function. Never imports or references
-    app.market.predictability's or app.scoring.confidence's threshold
-    constants (spec §0.1/§7): this function reports evidence, it never
-    decides or writes production values."""
+) -> BacktestResults:
+    """The fetch/sweep/pool/aggregate core shared by Adoption Evaluation
+    (run_evaluation, target = this player's own MarketSnapshot) and
+    Model Validation (app.backtest.model_validation.run_model_validation,
+    target = discovered from real EDDN coverage at stations this player
+    has actually docked at) -- docs/PHASE_2_6E...v0.2 §13.1. Only target
+    *selection* and what happens to the result (decide_*_adoption is
+    Adoption-only) differ between the two callers; this function itself
+    has no notion of which track is calling it."""
     max_window_days = max(window_days_options)
     fetch_window_start = now - dt.timedelta(days=max_window_days)
     fetch_dates = [
@@ -193,7 +203,6 @@ def run_evaluation(
         ensure_days_fetched(session, target.station_id, target.commodity_name, fetch_dates, client)
 
     volatility_by_window: dict[int, OrderingHypothesisResult] = {}
-    volatility_decision_by_window: dict[int, AdoptionDecision] = {}
     target_sample_counts: dict[EvaluationTarget, int] = {}
     freshness_samples: list[ReplaySample] = []
 
@@ -211,9 +220,7 @@ def run_evaluation(
             window_target_counts[target] = len(collection.samples)
 
         volatility_stats = aggregate_by_volatility_class(window_samples)
-        result = evaluate_ordering_hypothesis(volatility_stats)
-        volatility_by_window[window_days] = result
-        volatility_decision_by_window[window_days] = decide_volatility_adoption(result)
+        volatility_by_window[window_days] = evaluate_ordering_hypothesis(volatility_stats)
 
         # Freshness/target-count reporting uses the widest window's
         # samples -- age_at_t0()/forecast_error don't depend on
@@ -226,17 +233,45 @@ def run_evaluation(
 
     freshness_stats = aggregate_by_freshness_bucket(freshness_samples)
     freshness_result = evaluate_freshness_monotonicity(freshness_stats)
-    freshness_decision = decide_freshness_adoption(freshness_result)
+
+    return BacktestResults(
+        volatility_by_window=volatility_by_window,
+        freshness=freshness_result,
+        target_sample_counts=target_sample_counts,
+    )
+
+
+def run_evaluation(
+    session: Session,
+    client: StreamingHttpClient,
+    now: dt.datetime,
+    targets: list[EvaluationTarget],
+    window_days_options: tuple[int, ...] = (7, 14, 30),
+    t0_interval: dt.timedelta = EVALUATION_T0_INTERVAL,
+    horizon: dt.timedelta = dt.timedelta(hours=1),
+) -> EvaluationRunReport:
+    """Orchestrates spec §1-§6 (Adoption Evaluation track only). No new
+    statistical logic -- every number comes from an existing 2-6A-D
+    function. Never imports or references app.market.predictability's or
+    app.scoring.confidence's threshold constants (spec §0.1/§7): this
+    function reports evidence, it never decides or writes production
+    values."""
+    backtest = compute_backtest_results(session, client, now, targets, window_days_options, t0_interval, horizon)
+
+    volatility_decision_by_window = {
+        window_days: decide_volatility_adoption(result) for window_days, result in backtest.volatility_by_window.items()
+    }
+    freshness_decision = decide_freshness_adoption(backtest.freshness)
 
     journal_coverage = _collect_journal_coverage(session)
 
     return EvaluationRunReport(
         generated_at=now,
         targets=targets,
-        target_sample_counts=target_sample_counts,
-        volatility_by_window=volatility_by_window,
+        target_sample_counts=backtest.target_sample_counts,
+        volatility_by_window=backtest.volatility_by_window,
         volatility_decision_by_window=volatility_decision_by_window,
-        freshness=freshness_result,
+        freshness=backtest.freshness,
         freshness_decision=freshness_decision,
         journal_coverage=journal_coverage,
     )

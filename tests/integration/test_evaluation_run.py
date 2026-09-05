@@ -5,6 +5,7 @@ import datetime as dt
 from app.backtest.evaluation_run import (
     EvaluationTarget,
     MAX_EVALUATION_TARGETS,
+    compute_backtest_results,
     decide_freshness_adoption,
     decide_volatility_adoption,
     run_evaluation,
@@ -135,6 +136,29 @@ def _build_payloads(now: dt.datetime, window_days: int) -> dict[str, bytes]:
         ]
         payloads[_archive_url(date)] = _compress_day(envelopes)
     return payloads
+
+
+class TestComputeBacktestResultsExtraction:
+    def test_run_evaluation_matches_direct_compute_backtest_results_call(self, db_session):
+        # docs/PHASE_2_6E...v0.2 §13.1: compute_backtest_results() was
+        # extracted from run_evaluation() so app/backtest/model_validation.py
+        # can reuse the identical fetch/sweep/pool/aggregate core. This
+        # proves the extraction didn't change run_evaluation()'s output.
+        targets = [EvaluationTarget(station_id=100, commodity_name="platinum")]
+        client = FakeStreamingHttpClient(_build_payloads(NOW, window_days=2))
+
+        report = run_evaluation(
+            db_session, client, NOW, targets, window_days_options=(1, 2), t0_interval=dt.timedelta(hours=6)
+        )
+
+        client2 = FakeStreamingHttpClient(_build_payloads(NOW, window_days=2))
+        direct = compute_backtest_results(
+            db_session, client2, NOW, targets, window_days_options=(1, 2), t0_interval=dt.timedelta(hours=6)
+        )
+
+        assert report.volatility_by_window == direct.volatility_by_window
+        assert report.freshness == direct.freshness
+        assert report.target_sample_counts == direct.target_sample_counts
 
 
 class TestRunEvaluation:
