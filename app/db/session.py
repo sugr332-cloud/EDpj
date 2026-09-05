@@ -10,6 +10,7 @@ from typing import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 
@@ -20,8 +21,18 @@ class Base(DeclarativeBase):
 
 def make_engine(database_url: str | None = None):
     url = database_url or settings.database_url
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, future=True)
+    kwargs: dict = {}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+        if ":memory:" in url:
+            # A plain in-memory sqlite engine hands each new thread its own
+            # (empty) database via SQLAlchemy's default pool — breaking
+            # anything that touches the session from another thread, e.g.
+            # FastAPI's TestClient (endpoints run in a worker thread pool).
+            # StaticPool keeps one shared connection alive for the whole
+            # engine regardless of thread.
+            kwargs["poolclass"] = StaticPool
+    return create_engine(url, future=True, **kwargs)
 
 
 engine = make_engine()

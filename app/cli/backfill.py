@@ -23,6 +23,7 @@ from app.db.models.journal import JournalEvent
 from app.db.models.market import MarketSnapshot
 from app.db.models.timing import RoutePlotSample, TimingSample
 from app.db.session import SessionLocal, init_db
+from app.db.upsert import upsert_ignore as _upsert_ignore
 from app.journal import events as ev
 from app.journal.extractor import docked_market_matches, extract_market_snapshot
 from app.journal.parser import InvalidLine, ParsedLine, iter_journal_lines, parse_journal_timestamp
@@ -56,22 +57,6 @@ class BackfillSummary:
     timing_sample_totals: dict[str, int] = field(default_factory=dict)
     supercruise_reached_target_total: int = 0
     route_plot_samples_total: int = 0
-
-
-def _upsert_ignore(session: Session, model, rows: list[dict], index_elements: list[str]) -> None:
-    if not rows:
-        return
-    dialect = session.get_bind().dialect.name
-    if dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as dialect_insert
-    elif dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as dialect_insert
-    else:
-        raise NotImplementedError(f"unsupported database dialect for upsert: {dialect}")
-
-    stmt = dialect_insert(model).values(rows)
-    stmt = stmt.on_conflict_do_nothing(index_elements=index_elements)
-    session.execute(stmt)
 
 
 def _ingest_journal_lines(directory: Path, session: Session) -> BackfillSummary:

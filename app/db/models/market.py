@@ -48,3 +48,40 @@ class MarketSnapshot(Base):
     )
     source: Mapped[str] = mapped_column(String, nullable=False, index=True)  # 'journal' | 'eddn'
     raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class MarketLatest(Base):
+    """(station_id, commodity_name) -> most recent observation, upserted
+    (IMPLEMENTATION_SPEC_V0.2.md §7.2: "MVPではmaterialized view refresh
+    に依存せず upsert する"). The upsert must only overwrite when the
+    incoming `observed_at` is newer than what's stored — EDDN delivery
+    order isn't guaranteed — see app/collectors/eddn.py."""
+
+    __tablename__ = "market_latest"
+    __table_args__ = (UniqueConstraint("station_id", "commodity_name", name="uq_market_latest_station_commodity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    commodity_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    buy_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    sell_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    supply: Mapped[int] = mapped_column(Integer, nullable=False)
+    demand: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)  # 'journal' | 'eddn'
+
+
+class StationActivity(Base):
+    """Raw observation count + last_observed_at per station. Deliberately
+    does NOT bake fixed 1h/6h/24h windows into columns — those are
+    query-time aggregations over `market_snapshots.observed_at`, kept
+    flexible rather than fixed at the schema level (per review feedback
+    on this table's design)."""
+
+    __tablename__ = "station_activity"
+    __table_args__ = (UniqueConstraint("station_id", name="uq_station_activity_station"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    observation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
