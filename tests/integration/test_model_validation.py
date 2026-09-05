@@ -8,6 +8,7 @@ from app.backtest.model_validation import (
     ModelValidationReport,
     candidate_station_ids,
     discover_commodities_at_station,
+    discover_commodities_at_stations,
     run_model_validation,
     select_model_validation_targets,
 )
@@ -77,6 +78,32 @@ class TestDiscoverCommoditiesAtStation:
         result = discover_commodities_at_station(100, DISCOVERY_DATE, client)
 
         assert result.observation_counts == {}
+
+
+class TestDiscoverCommoditiesAtStations:
+    def test_checks_multiple_stations_in_a_single_archive_scan(self):
+        envelopes = [
+            _envelope(100, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5}]),
+            _envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T11:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 3}]),
+            _envelope(300, f"{DISCOVERY_DATE:%Y-%m-%d}T12:00:00Z", [{"name": "silver", "sellPrice": 5000, "demand": 2}]),
+        ]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        results = discover_commodities_at_stations([100, 200, 300], DISCOVERY_DATE, client)
+
+        assert len(client.requested_urls) == 1  # one archive fetch, not one per station
+        assert [r.observation_counts for r in results] == [{"platinum": 1}, {"gold": 1}, {"silver": 1}]
+
+    def test_preserves_input_order_including_discovery_empty_stations(self):
+        envelopes = [_envelope(200, f"{DISCOVERY_DATE:%Y-%m-%d}T10:00:00Z", [{"name": "gold", "sellPrice": 9000, "demand": 1}])]
+        client = FakeStreamingHttpClient({_archive_url(DISCOVERY_DATE): _compress_day(envelopes)})
+
+        results = discover_commodities_at_stations([100, 200], DISCOVERY_DATE, client)
+
+        assert results[0].station_id == 100
+        assert results[0].observation_counts == {}  # DISCOVERY_EMPTY
+        assert results[1].station_id == 200
+        assert results[1].observation_counts == {"gold": 1}
 
 
 class TestSelectModelValidationTargets:

@@ -1,7 +1,7 @@
 # EDpj Phase 2-6E Final Evaluation Implementation Baseline
 
 **Version:** 0.2
-**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。既存375テスト+新規12テスト、計387テスト全通過。Exit Criteria全項目達成）
+**Status:** Implemented（v0.1: `app/backtest/evaluation_run.py`新設、既存360テスト+新規15テスト=375。v0.2: Model Validation track追加 — `app/backtest/model_validation.py`新設、`evaluation_run.py`から`compute_backtest_results()`を抽出。候補station複数件を1回のarchiveスキャンでまとめてdiscoveryする`discover_commodities_at_stations()`へ統合（当初案は候補station数だけ同じ日を重複取得していたため、実データ投入前に修正）。既存375テスト+新規14テスト、計389テスト全通過。Exit Criteria全項目達成）
 **Date:** 2026-09-05
 **Revision note（v0.2、Evaluation Run #1の実行後に発覚した設計ギャップへの対応）**: Evaluation Run #1（実データ）で本人`MarketSnapshot(source='journal')`が0件であることが判明し、§1.1の「評価対象は本人のMarketSnapshotのみ」という設計が、「モデルが実データ上一般に妥当か」と「本人環境で採用してよいか」という2つの異なる問いを暗黙に1本化していたことが分かった。v0.2は§13を追加し、評価を**Adoption Evaluation**（本人MarketSnapshot起点、§7の採用手順の唯一の根拠）と**Model Validation**（実際にDockしたstationから発見した実在commodityが起点、採用判断には使わない）の二層に分離する。§1〜§12の既存決定（Adoption Evaluation側の設計）は変更していない。
 **Depends on:** `docs/PHASE_2_6_HISTORICAL_BACKTEST_DESIGN_BASELINE_V0.1.md` §9（v0.1, commit `013d92c`）, `docs/PHASE_2_6A_HISTORICAL_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.2, commit `c4bbe8e`）, `docs/PHASE_2_6B_VOLATILITY_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `51d55e9`）, `docs/PHASE_2_6C_FRESHNESS_EVALUATION_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0c7d070`）, `docs/PHASE_2_6D_PLAYER_STATE_REPLAY_IMPLEMENTATION_BASELINE_V0.1.md`（v0.1, commit `0a1c279`）, `app/backtest/replay.py`, `app/backtest/volatility_evaluation.py`, `app/backtest/freshness_evaluation.py`, `app/backtest/journal_replay.py`, `app/market/predictability.py`, `app/scoring/confidence.py`
@@ -415,7 +415,7 @@ Model Validation（新設、app/backtest/model_validation.py）
 
 1. **候補station**: 本人の実Journalで実際にDockした`station_id`（`JournalEvent(event_type=Docked)`のMarketIDのdistinct集合、`candidate_station_ids()`）。これらは（EDDN報告の有無に関わらず）確実に実在する有効なMarketIDである。
 
-2. **Discovery scan対象期間**: 候補stationごとに、**1日分のみ**（`discovery_date = (now - 1日).date()`）をarchiveからフルスキャンする（`discover_commodities_at_station()`）。「今日」はまだarchive化されていない可能性があるため（`docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md` §4、`iter_commodity_day`は未生成日を0件として返す）、1日前を使う。
+2. **Discovery scan対象期間**: **1日分のみ**（`discovery_date = (now - 1日).date()`）をarchiveからフルスキャンする。「今日」はまだarchive化されていない可能性があるため（`docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md` §4、`iter_commodity_day`は未生成日を0件として返す）、1日前を使う。**候補station全件を`discover_commodities_at_stations()`で1回のarchiveスキャンにまとめる**——候補stationごとに同じ日を個別スキャンすると（`discover_commodities_at_station()`を単純にループする実装だと）、同一日のarchiveファイルを候補station数だけ重複取得することになり、コスト（§1.1と同じ根拠）を不必要に増やす。単一station向けの`discover_commodities_at_station()`はテスト・個別確認用の薄いラッパーとして残す。
 
 3. **commodity 0件の扱い**: スキャンした候補stationがその日EDDNへ一切報告されなかった場合、`StationDiscoveryResult(observation_counts={})`として明示的に記録する（`app.market.predictability.MarketHistoricalFetchLog`と同じ「0件」と「未スキャン」を区別する設計）。空dictは「そのstationは取引がない」ではなく「その日の EDDN報告がなかった」という意味であり、target候補から自然に除外されるが、`ModelValidationReport.station_discoveries`には必ず残る。
 

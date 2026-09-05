@@ -77,24 +77,52 @@ def candidate_station_ids(session: Session) -> list[int]:
 def discover_commodities_at_station(
     station_id: int, discovery_date: dt.date, client: StreamingHttpClient
 ) -> StationDiscoveryResult:
-    """Scans exactly one archived day for `station_id`, across ALL
-    commodities -- there is no station×commodity index anywhere (spec
-    §13.2 point 2), so a full-day scan for this one station is the only
-    way to learn what it actually trades. Malformed envelopes are
-    skipped, same policy as the live EDDN subscriber
-    (app/collectors/eddn.py) and app.collectors.eddn_archive.fetch_commodity_observations."""
-    observation_counts: dict[str, int] = {}
+    """Single-station convenience wrapper around
+    discover_commodities_at_stations() -- kept for callers/tests that
+    only care about one station. Prefer discover_commodities_at_stations()
+    when checking multiple candidates for the same discovery_date: this
+    function alone would re-download that day's full archive once per
+    call, which is wasteful when select_model_validation_targets() has
+    several candidate stations to check on the same day."""
+    return discover_commodities_at_stations([station_id], discovery_date, client)[0]
+
+
+def discover_commodities_at_stations(
+    station_ids: list[int], discovery_date: dt.date, client: StreamingHttpClient
+) -> list[StationDiscoveryResult]:
+    """Scans exactly one archived day ONCE, across ALL commodities,
+    checking every station in `station_ids` in the same pass -- there is
+    no station×commodity index anywhere (spec §13.2 point 2), so a
+    full-day scan is the only way to learn what a station actually
+    trades, and re-scanning the same day per-station would multiply
+    archive bandwidth for no reason when there are several candidates
+    (spec §13.2 point 1 can produce more than one candidate station).
+    Malformed envelopes are skipped, same policy as the live EDDN
+    subscriber (app/collectors/eddn.py) and
+    app.collectors.eddn_archive.fetch_commodity_observations. Returns
+    one StationDiscoveryResult per input station_id, in the same order,
+    even if that station never appeared that day (DISCOVERY_EMPTY,
+    spec §13.2 point 3)."""
+    targets = set(station_ids)
+    counts_by_station: dict[int, dict[str, int]] = {sid: {} for sid in targets}
     for envelope in iter_commodity_day(discovery_date, client):
         message = envelope.get("message")
-        if not isinstance(message, dict) or message.get("marketId") != station_id:
+        if not isinstance(message, dict):
+            continue
+        market_id = message.get("marketId")
+        if market_id not in targets:
             continue
         try:
             rows = parse_commodity_message(message, received_at=dt.datetime.now(dt.timezone.utc))
         except MalformedEddnMessage:
             continue
+        counts = counts_by_station[market_id]
         for row in rows:
-            observation_counts[row["commodity_name"]] = observation_counts.get(row["commodity_name"], 0) + 1
-    return StationDiscoveryResult(station_id=station_id, discovery_date=discovery_date, observation_counts=observation_counts)
+            counts[row["commodity_name"]] = counts.get(row["commodity_name"], 0) + 1
+    return [
+        StationDiscoveryResult(station_id=sid, discovery_date=discovery_date, observation_counts=counts_by_station[sid])
+        for sid in station_ids
+    ]
 
 
 @dataclass(frozen=True)
@@ -119,10 +147,7 @@ def select_model_validation_targets(
     never reordered after the fact based on which result "looks better"
     (spec §13.2 point 4)."""
     discovery_date = (now - dt.timedelta(days=1)).date()
-    discoveries = [
-        discover_commodities_at_station(station_id, discovery_date, client)
-        for station_id in candidate_station_ids(session)
-    ]
+    discoveries = discover_commodities_at_stations(candidate_station_ids(session), discovery_date, client)
 
     candidates: list[ModelValidationTarget] = []
     for discovery in discoveries:
