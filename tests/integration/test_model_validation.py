@@ -12,6 +12,7 @@ from app.backtest.model_validation import (
     run_model_validation,
     select_model_validation_targets,
 )
+from app.backtest.evaluation_run import EvaluationTarget
 from app.db.models.journal import JournalEvent
 from app.db.models.market import MarketPredictability
 from app.journal import events as ev
@@ -183,6 +184,9 @@ class TestRunModelValidation:
         assert report.station_discoveries[0].station_id == 100
         assert set(report.volatility_by_window.keys()) == {1, 2}
         assert report.freshness is not None
+        assert set(report.target_sample_counts.keys()) == {
+            EvaluationTarget(t.station_id, t.commodity_name) for t in report.targets
+        }
 
     def test_never_writes_to_market_predictability(self, db_session):
         _docked_event(db_session, 100, 1)

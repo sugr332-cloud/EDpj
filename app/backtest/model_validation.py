@@ -168,6 +168,7 @@ class ModelValidationReport:
     discovery_date: dt.date
     station_discoveries: list[StationDiscoveryResult]
     targets: list[ModelValidationTarget]
+    target_sample_counts: dict[EvaluationTarget, int]  # same review rationale as EvaluationRunReport's field
     volatility_by_window: dict[int, OrderingHypothesisResult]
     freshness: FreshnessMonotonicityResult
     # Deliberately no *_decision field -- Model Validation never produces
@@ -198,6 +199,7 @@ def run_model_validation(
         discovery_date=(now - dt.timedelta(days=1)).date(),
         station_discoveries=discoveries,
         targets=targets,
+        target_sample_counts=backtest.target_sample_counts,
         volatility_by_window=backtest.volatility_by_window,
         freshness=backtest.freshness,
     )
