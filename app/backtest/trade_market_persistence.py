@@ -37,6 +37,15 @@ from app.market.predictability import MAX_OBSERVATION_GAP, STABLE_MEDIAN_PRICE_C
 
 MATERIAL_DECREASE_RELATIVE_THRESHOLD = STABLE_MEDIAN_PRICE_CHANGE  # frozen, design doc §3
 
+# Symmetric ("either direction") small-change band -- numerically the
+# same constant as MATERIAL_DECREASE_RELATIVE_THRESHOLD, but a distinct
+# concept: "unchanged" (Phase 2-6F-T3 §2.2) tests |relative_change|,
+# while "material decrease" only ever tests the downward direction.
+# Sharing the number is deliberate (reuse the one already-reviewed
+# threshold rather than invent a second one), not a coincidence to be
+# confused with the directional test.
+UNCHANGED_ABS_RELATIVE_THRESHOLD = STABLE_MEDIAN_PRICE_CHANGE
+
 PERSISTENCE_WINDOWS_MINUTES = [5, 10, 15, 30, 60, 120]
 
 
@@ -522,4 +531,353 @@ def compute_profit_condition_persistence(
     return ProfitConditionPersistenceResult(
         window=window, status=status, eligible_count=eligible_count, comparison_count=comparison_count,
         persistence=persistence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2-6F-T3: rigorous window-relative re-analysis.
+#
+# Fixes a real methodological flaw in compute_price_persistence() above:
+# that function used the flat MAX_OBSERVATION_GAP (6h) as its tolerance
+# for EVERY window, so a "5-minute" comparison could silently be matched
+# against an observation up to 6 hours later. This section does NOT
+# modify or replace compute_price_persistence()/its results -- both are
+# kept, and this section's numbers are cross-referenced against them
+# (docs/PHASE_2_6F_T3_..._DESIGN_BASELINE_V0.1.md §0/§7) so a real
+# earlier finding is never silently overwritten, only superseded with
+# the discrepancy stated openly.
+# ---------------------------------------------------------------------------
+
+
+def _median_p25_p75(values: list) -> tuple:
+    """None,None,None for fewer than 4 points -- quartiles from a
+    handful of samples would overstate precision the data doesn't
+    support (median alone is still reported once >=1 point exists)."""
+    if not values:
+        return None, None, None
+    if len(values) < 4:
+        return statistics.median(values), None, None
+    quartiles = statistics.quantiles(values, n=4, method="exclusive")
+    return statistics.median(values), quartiles[0], quartiles[2]
+
+
+@dataclass(frozen=True)
+class PriceComparison:
+    station_id: int
+    commodity_name: str
+    t0: dt.datetime
+    t0_price: int
+    window: dt.timedelta
+    matched_observed_at: dt.datetime
+    matched_price: int
+    comparison_gap: dt.timedelta  # matched_observed_at - target; signed (early match is negative)
+
+
+def _find_window_comparison(
+    rows: list[MarketHistoricalObservation], t0_index: int, window: dt.timedelta
+) -> MarketHistoricalObservation | None:
+    """Phase 2-6F-T3 §1: valid only if |observed_at - target| <= window
+    (tolerance scales with the window itself, not a flat constant) --
+    e.g. target=T0+30min accepts a match up to 30min early or late, so
+    an observation 150 minutes after target (the user's own worked
+    example) is correctly rejected regardless of window size."""
+    t0_row = rows[t0_index]
+    target = _naive(t0_row.observed_at) + window
+    candidates = [r for r in rows[t0_index + 1 :] if abs(_naive(r.observed_at) - target) <= window]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda r: abs(_naive(r.observed_at) - target))
+
+
+def collect_price_comparisons(
+    session: Session, window: dt.timedelta
+) -> tuple[list[PriceComparison], int, int]:
+    """Returns (comparisons, eligible_count, undefined_baseline_count).
+    `eligible_count` counts every observation as a T0 candidate;
+    `undefined_baseline_count` is those with t0_price<=0 (relative
+    change undefined, excluded rather than guessed); the remainder
+    without a comparison are implicitly censored (eligible_count -
+    undefined_baseline_count - len(comparisons))."""
+    comparisons: list[PriceComparison] = []
+    eligible_count = 0
+    undefined_baseline_count = 0
+    for (station_id, commodity_name), rows in _rows_by_station_commodity(session).items():
+        for i, t0_row in enumerate(rows):
+            eligible_count += 1
+            if t0_row.sell_price <= 0:
+                undefined_baseline_count += 1
+                continue
+            match = _find_window_comparison(rows, i, window)
+            if match is None:
+                continue
+            target = _naive(t0_row.observed_at) + window
+            comparisons.append(
+                PriceComparison(
+                    station_id=station_id, commodity_name=commodity_name, t0=t0_row.observed_at,
+                    t0_price=t0_row.sell_price, window=window, matched_observed_at=match.observed_at,
+                    matched_price=match.sell_price, comparison_gap=_naive(match.observed_at) - target,
+                )
+            )
+    return comparisons, eligible_count, undefined_baseline_count
+
+
+def _material_decrease_within_window(
+    rows: list[MarketHistoricalObservation], t0_index: int, window: dt.timedelta, threshold: float
+) -> bool:
+    """Distinct from the single point-in-time comparison used for
+    material_decrease_at_window_rate: True if a material decrease is
+    observed ANYWHERE in (T0, T0+window], not just at the matched T0+
+    window snapshot -- a price that dipped and partially recovered by
+    the exact window boundary still counts here (design doc §5's
+    explicit "within t" vs "at t" distinction)."""
+    t0_row = rows[t0_index]
+    t0_price = t0_row.sell_price
+    window_end = _naive(t0_row.observed_at) + window
+    for later_row in rows[t0_index + 1 :]:
+        observed_at = _naive(later_row.observed_at)
+        if observed_at > window_end:
+            break
+        if _is_material_decrease(t0_price, later_row.sell_price, threshold):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class WindowPriceStats:
+    window: dt.timedelta
+    eligible_count: int
+    comparison_count: int
+    undefined_baseline_count: int
+    censored_count: int
+    unchanged_rate: float | None
+    decrease_rate: float | None
+    median_relative_change: float | None
+    p25_relative_change: float | None
+    p75_relative_change: float | None
+    material_decrease_at_window_rate: float | None
+    material_decrease_within_window_rate: float | None
+    median_observation_gap: dt.timedelta | None
+    p25_observation_gap: dt.timedelta | None
+    p75_observation_gap: dt.timedelta | None
+
+
+def compute_window_price_stats(
+    session: Session,
+    window: dt.timedelta,
+    material_threshold: float = MATERIAL_DECREASE_RELATIVE_THRESHOLD,
+    unchanged_threshold: float = UNCHANGED_ABS_RELATIVE_THRESHOLD,
+) -> WindowPriceStats:
+    comparisons, eligible_count, undefined_baseline_count = collect_price_comparisons(session, window)
+    comparison_count = len(comparisons)
+    censored_count = eligible_count - undefined_baseline_count - comparison_count
+
+    relative_changes = [(c.matched_price - c.t0_price) / c.t0_price for c in comparisons]
+    unchanged_rate = (
+        None if comparison_count == 0
+        else sum(1 for r in relative_changes if abs(r) < unchanged_threshold) / comparison_count
+    )
+    decrease_rate = None if comparison_count == 0 else sum(1 for r in relative_changes if r < 0) / comparison_count
+    median_change, p25_change, p75_change = _median_p25_p75(relative_changes)
+
+    material_at_window = None
+    if comparison_count > 0:
+        hits = sum(1 for c in comparisons if _is_material_decrease(c.t0_price, c.matched_price, material_threshold))
+        material_at_window = hits / comparison_count
+
+    by_pair = _rows_by_station_commodity(session)
+    within_window_eligible = 0
+    within_window_hits = 0
+    for (station_id, commodity_name), rows in by_pair.items():
+        for i, t0_row in enumerate(rows[:-1]):
+            if t0_row.sell_price <= 0:
+                continue
+            within_window_eligible += 1
+            if _material_decrease_within_window(rows, i, window, material_threshold):
+                within_window_hits += 1
+    material_within_window = None if within_window_eligible == 0 else within_window_hits / within_window_eligible
+
+    gaps = [abs(c.comparison_gap) for c in comparisons]
+    median_gap, p25_gap, p75_gap = _median_p25_p75(gaps)
+
+    return WindowPriceStats(
+        window=window,
+        eligible_count=eligible_count,
+        comparison_count=comparison_count,
+        undefined_baseline_count=undefined_baseline_count,
+        censored_count=censored_count,
+        unchanged_rate=unchanged_rate,
+        decrease_rate=decrease_rate,
+        median_relative_change=median_change,
+        p25_relative_change=p25_change,
+        p75_relative_change=p75_change,
+        material_decrease_at_window_rate=material_at_window,
+        material_decrease_within_window_rate=material_within_window,
+        median_observation_gap=median_gap,
+        p25_observation_gap=p25_gap,
+        p75_observation_gap=p75_gap,
+    )
+
+
+@dataclass(frozen=True)
+class ProfitWindowStats:
+    window: dt.timedelta
+    status: PersistenceMeasurementStatus
+    eligible_count: int
+    comparison_count: int
+    profit_condition_persistence: float | None
+    median_source_dest_time_diff: dt.timedelta | None
+
+
+@dataclass(frozen=True)
+class MatchedTradeOpportunity:
+    source: MarketHistoricalObservation
+    dest: MarketHistoricalObservation
+    later_source: MarketHistoricalObservation
+    later_dest: MarketHistoricalObservation
+    source_dest_time_diff: dt.timedelta
+
+
+def _iter_matched_trade_opportunities(session: Session, window: dt.timedelta) -> list[MatchedTradeOpportunity]:
+    """Shared route-matching core for compute_profit_window_stats() and
+    compute_margin_change_decomposition() -- one (source, dest) T0
+    profitable opportunity, aligned within `window` of each other (§1's
+    tolerance concept reused for source/dest alignment too), matched
+    against its nearest later (source, dest) pair within the same
+    window-relative tolerance from the target T0+window."""
+    buy_rows = (
+        session.query(MarketHistoricalObservation)
+        .filter(MarketHistoricalObservation.buy_price.isnot(None))
+        .order_by(MarketHistoricalObservation.commodity_name, MarketHistoricalObservation.observed_at)
+        .all()
+    )
+    if not buy_rows:
+        return []
+
+    sell_by_commodity: dict[str, list[MarketHistoricalObservation]] = defaultdict(list)
+    for row in (
+        session.query(MarketHistoricalObservation)
+        .order_by(MarketHistoricalObservation.commodity_name, MarketHistoricalObservation.observed_at)
+        .all()
+    ):
+        sell_by_commodity[row.commodity_name].append(row)
+
+    matches: list[MatchedTradeOpportunity] = []
+    for source in buy_rows:
+        for dest in sell_by_commodity.get(source.commodity_name, []):
+            if dest.station_id == source.station_id:
+                continue
+            if abs(_naive(dest.observed_at) - _naive(source.observed_at)) > window:
+                continue
+            if dest.sell_price - source.buy_price <= 0:
+                continue
+
+            target = _naive(source.observed_at) + window
+            later_sources = [
+                r for r in buy_rows
+                if r.station_id == source.station_id and r.commodity_name == source.commodity_name
+                and abs(_naive(r.observed_at) - target) <= window
+            ]
+            later_dests = [
+                r for r in sell_by_commodity.get(source.commodity_name, [])
+                if r.station_id == dest.station_id and abs(_naive(r.observed_at) - target) <= window
+            ]
+            if not later_sources or not later_dests:
+                continue
+
+            matches.append(
+                MatchedTradeOpportunity(
+                    source=source, dest=dest,
+                    later_source=min(later_sources, key=lambda r: abs(_naive(r.observed_at) - target)),
+                    later_dest=min(later_dests, key=lambda r: abs(_naive(r.observed_at) - target)),
+                    source_dest_time_diff=abs(_naive(dest.observed_at) - _naive(source.observed_at)),
+                )
+            )
+    return matches
+
+
+def compute_profit_window_stats(session: Session, window: dt.timedelta) -> ProfitWindowStats:
+    """Same route definition as compute_profit_condition_persistence
+    (source.buy_price known, dest is any other station's sell
+    observation for the same commodity), but using the window-relative
+    tolerance from §1 instead of the flat MAX_OBSERVATION_GAP, and
+    explicitly recording the source/dest alignment time difference
+    (design doc §2.3/§6). INSUFFICIENT whenever no row has buy_price --
+    same structural gap as compute_profit_condition_persistence, not a
+    new decision (docs/PHASE_2_6F_T1... §10, backfill Deferred)."""
+    has_buy_price = (
+        session.query(MarketHistoricalObservation).filter(MarketHistoricalObservation.buy_price.isnot(None)).first()
+        is not None
+    )
+    if not has_buy_price:
+        return ProfitWindowStats(
+            window=window, status=PersistenceMeasurementStatus.INSUFFICIENT,
+            eligible_count=0, comparison_count=0, profit_condition_persistence=None,
+            median_source_dest_time_diff=None,
+        )
+
+    matches = _iter_matched_trade_opportunities(session, window)
+    eligible_count = len(matches)
+    comparison_count = eligible_count  # every returned match already has both later observations
+    still_profitable_count = sum(1 for m in matches if m.later_dest.sell_price - m.later_source.buy_price > 0)
+    time_diffs = [m.source_dest_time_diff for m in matches]
+
+    persistence = None if comparison_count == 0 else still_profitable_count / comparison_count
+    status = (
+        PersistenceMeasurementStatus.INSUFFICIENT if comparison_count == 0 else PersistenceMeasurementStatus.COMPUTED
+    )
+    median_diff = statistics.median(time_diffs) if time_diffs else None
+    return ProfitWindowStats(
+        window=window, status=status, eligible_count=eligible_count, comparison_count=comparison_count,
+        profit_condition_persistence=persistence, median_source_dest_time_diff=median_diff,
+    )
+
+
+@dataclass(frozen=True)
+class MarginChangeDecomposition:
+    status: PersistenceMeasurementStatus
+    source_buy_only_changed_count: int
+    dest_sell_only_changed_count: int
+    both_changed_count: int
+    neither_changed_count: int
+
+
+def compute_margin_change_decomposition(session: Session, window: dt.timedelta) -> MarginChangeDecomposition:
+    """Whether it was the source Buy price, the destination Sell price,
+    both, or neither that moved between T0 and the window-relative
+    later match (§2.4). "Changed" means any nonzero difference -- no
+    separate materiality threshold is defined for this breakdown in the
+    spec, so it stays binary (moved / didn't). INSUFFICIENT whenever no
+    row has buy_price -- same structural gap as compute_profit_window_stats,
+    not a new decision."""
+    matches = _iter_matched_trade_opportunities(session, window)
+    if not matches:
+        has_buy_price = (
+            session.query(MarketHistoricalObservation)
+            .filter(MarketHistoricalObservation.buy_price.isnot(None))
+            .first()
+            is not None
+        )
+        return MarginChangeDecomposition(
+            status=PersistenceMeasurementStatus.INSUFFICIENT if not has_buy_price else PersistenceMeasurementStatus.COMPUTED,
+            source_buy_only_changed_count=0, dest_sell_only_changed_count=0,
+            both_changed_count=0, neither_changed_count=0,
+        )
+
+    buy_only = sell_only = both = neither = 0
+    for m in matches:
+        buy_changed = m.later_source.buy_price != m.source.buy_price
+        sell_changed = m.later_dest.sell_price != m.dest.sell_price
+        if buy_changed and sell_changed:
+            both += 1
+        elif buy_changed:
+            buy_only += 1
+        elif sell_changed:
+            sell_only += 1
+        else:
+            neither += 1
+
+    return MarginChangeDecomposition(
+        status=PersistenceMeasurementStatus.COMPUTED,
+        source_buy_only_changed_count=buy_only, dest_sell_only_changed_count=sell_only,
+        both_changed_count=both, neither_changed_count=neither,
     )
