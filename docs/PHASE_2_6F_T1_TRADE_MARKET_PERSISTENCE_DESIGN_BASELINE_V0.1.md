@@ -1,7 +1,7 @@
 # EDpj Phase 2-6F-T1 Trade Market Persistence — Design Baseline
 
 **Version:** 0.1
-**Status:** Implemented（`app/backtest/trade_market_persistence.py`、新規25テスト全通過。実データ（1784行）に対して6ウィンドウ全て実行し、実測値を記録済み。`profit_condition_persistence`は構造的`INSUFFICIENT`を確認済み）
+**Status:** Complete（Price persistence / Time-to-first-decrease / Data quality analysisはPASS相当で実データにより確定。`profit_condition_persistence`は`buy_price`バックフィル未実施のため`INSUFFICIENT`——これは本Phaseの失敗ではなく、正しい`INSUFFICIENT`分類。バックフィル（既知15日分アーカイブ再取得、約1〜1.7GB）は**Deferred**、人間判断により2026-09-06に確定。実施タイミングはTrade Formula Validationが実現利益データ収集に着手する段階まで持ち越す——詳細は§10参照）
 **Date:** 2026-09-06
 **Depends on:** `docs/SPECIFICATION_TRADE_SCOPE_AMENDMENT_V0.1.md`, `docs/SPECIFICATION_TRADE_MARKET_PERSISTENCE_AMENDMENT_V0.1.md`, `docs/PHASE_TRADE_MARKET_PERSISTENCE_V0.1.md`（以上binding、本書は実行計画を具体化するのみ）, `app/backtest/replay.py`, `app/market/predictability.py`, `app/db/models/market.py`
 
@@ -124,9 +124,48 @@ compute_data_quality_reportが、1系列のみで観測が1件しかない場合
 
 実装中に、`ensure_days_fetched_batch`が`received_at`にアーカイブ処理を実行した「今」の時刻（`dt.datetime.now()`）を渡していたことを発見した——アーカイブ由来の観測に対してこれは意味を持たない（同じバックフィル実行内の全行がほぼ同一時刻になり、「EDDNが実際にいつ受信したか」を全く表さない）。アーカイブenvelope自身の`header.gatewayTimestamp`を代わりに使うよう修正した（欠落・不正な形式の場合は`None`——推測しない）。ライブリスナー経路（`app/collectors/eddn.py`の`ingest_message`相当）は元々ほぼリアルタイムなので変更していない。
 
-## 9. 決定事項サマリ
+## 10. バックフィル判断: Deferred（2026-09-06、人間判断で確定）
+
+再取得コストを正確に算出した: `MarketHistoricalFetchLog`は**15日分**（2026-08-21〜09-04）のみを記録しており、Phase 2-6Eの日付単位batch化のおかげで再取得コストは対象数（307）ではなく日数（15）で決まる——アーカイブ1日あたり60〜112MB圧縮 × 15日 ≒ **約1〜1.7GB**（当初の記憶ベースの概算「~2GB」よりやや少ない、確定値）。
+
+| 項目 | バックフィルなし | バックフィル実施 |
+|---|---|---|
+| Price Persistence | 計算済み | 変化なし |
+| Time-to-first-decrease | 計算済み | 変化なし |
+| Profit-condition persistence | INSUFFICIENT | 計算可能になる |
+| `received_at`補完 | 一部不完全 | 完全になる |
+| Trade Formula Validation | 未着手 | **未着手のまま**（実現利益データが別途必要） |
+| 実現利益`MarketBuy`/`MarketSell` | 0件 | 0件（変化なし） |
+| 再取得コスト | 0 | 約1〜1.7GB |
+
+**結論**: バックフィルで解消できるのは本Phase（2-6F-T1）内の`profit_condition_persistence`のみであり、次の実ボトルネックである**Trade Formula Validation**（実現利益データ、`MarketBuy`/`MarketSell`が0件）は解消しない——投資対効果が薄い今のタイミングでは実施しない。
+
+**Deferred（保留、却下ではない）**: バックフィルの実施タイミングは、Trade Formula Validationのために実現Tradeデータの収集方法を設計・着手する段階まで持ち越す。その段階であれば、同じ帯域コストで「実現利益データの収集」と「profit_condition_persistenceの解消」を同時に達成でき、投資対効果が高くなる。
+
+`profit_condition_persistence`が`INSUFFICIENT`であることは、**本Phase（2-6F-T1）の失敗ではない**——本Phaseの目的（外部市場価格が時間経過に対してどの程度維持されるかを実データで特性化すること）はPrice Persistence/Time-to-first-decrease/Data Quality Analysisで十分に達成されている。
+
+```text
+2-6F-T1 Trade Market Persistence Analysis
+        │
+        ├─ Price persistence             確定（実データ、要注記——§6.5）
+        ├─ Time-to-first-decrease        確定（実データ）
+        ├─ Data quality analysis         確定（実データ）
+        └─ Profit-condition persistence  INSUFFICIENT
+             │
+             └─ Reason: buy_price historical data unavailable
+                Backfill: DEFERRED（人間判断、2026-09-06）
+                         ↓
+        Phase 2-6F Trade Formula Validation（未着手、次の実ボトルネック）
+                         ↓
+        実現利益 MarketBuy / MarketSell = 0件
+                         ↓
+        （実現Tradeデータ収集方法の設計が次の課題）
+```
+
+## 11. 決定事項サマリ
 
 1. **§1 Tradeの価格持続性は実データで即座に評価可能**——MiningやBioと異なり実観測1784行が既に存在する
-2. **§2 profit_condition_persistenceは列不足で構造的にブロックされている**——ただしMiningのCargoState問題とは異なり、原因はアーカイブ側の情報を捨てていたことであり、今後のfetchから直せる軽微な修正。既存データのバックフィル（~2GB再ダウンロード）は別途判断が必要な独立した決定として保留する
+2. **§2 profit_condition_persistenceは列不足で構造的にブロックされている**——ただしMiningのCargoState問題とは異なり、原因はアーカイブ側の情報を捨てていたことであり、今後のfetchから直せる軽微な修正
 3. **§3 material decrease閾値は既存の`STABLE_MEDIAN_PRICE_CHANGE=0.05`を再利用**——新しい閾値を結果を見る前に発明しない、既存のレビュー済み判断を流用する
 4. **§6 profit_condition_persistenceはコードとしては実装するが、実行結果は正直に`INSUFFICIENT`**——コードが動くことと指標が計算できることは別
+5. **§10 バックフィルはDeferred**——コスト（約1〜1.7GB）に見合う次のボトルネック解消（Trade Formula Validation）にはならないため、実現Tradeデータ収集の設計段階まで持ち越す。`INSUFFICIENT`はPhaseの失敗ではなく正しい分類
