@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C/T4-D第1回）
 
-**Version:** 0.4
-**Status:** T4-A/B/C 完了。T4-D第1回実証完了（重大な設計欠陥を発見・部分修正）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（Accuracy check・Distance/Jump統合が未完了）
+**Version:** 0.5
+**Status:** T4-A/B/C 完了。T4-D第1回実証+Accuracy Check部分PASS（§12、価格妥当性チェックの必要性を実証、実装は未着手）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（価格妥当性チェック実装・Distance/Jump統合が未完了）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -371,3 +371,88 @@ Replay再現性            → 未検証
 ```
 
 **結論**: T4-DはOrigin/Destination/Profit計算の基本構造が実データで動作することを実証したが、**まだ本番のTrade Candidate構築として採用できる完成度ではない**。特にAccuracy検証（tritium/gold級の価格差の裏取り）と、Distance/Jump統合が残っている。次にどちらを優先するかは要判断。
+
+## 12. T4-D Accuracy Check: Tritium / Goldの独立検証
+
+### 12.1 外部ソースは両方とも利用不可（正直に記録）
+
+**INARA**: `inara.cz/elite/commodity/`を直接取得したが、返ってきたHTMLに"gold"/"tritium"という文字列が一切含まれていなかった（コンテンツがJavaScriptで動的に読み込まれる構造）。本セッションはブラウザ実行環境を持たないため、この経路での照合は不可能。
+
+**EDData API**（`api.eddata.dev`）: 3回試行して全て`522`（Cloudflare Origin Connection Time-out）——サーバー側が到達不能。一時的な障害の可能性はあるが、今回は利用できなかった。
+
+**したがって、外部ソースとの直接照合は断念し、自データセット内の分布ベース検証に切り替えた。**
+
+### 12.2 分布ベース検証: 両候補とも母集団の絶対最大値（P100）だった
+
+2026-09-05の「通常market」（買取品目10以上）に限定した母集団全体（tritium sell側 n=40,107、gold sell側 n=51,399）の中で、T4-D v2が選んだdestination価格の位置を確認した:
+
+```text
+gold:
+  origin_buy=45,531  → buy_price分布のP75.6（正常な価格帯）
+  dest_sell=67,793   → sell_price分布のP100.0（母集団51,399件中の絶対最大値。P99ですら56,281）
+
+tritium:
+  origin_buy=50,009  → buy_price分布のP44.3（正常な価格帯）
+  dest_sell=150,622  → sell_price分布のP100.0（母集団40,107件中の絶対最大値。P99ですら61,468）
+```
+
+Origin側は完全に正常。**Destination側の両方が、母集団中で唯一無二の極端な最大値**——「たまたま高いが実在する価格」ではなく、統計的に強い異常signalである。
+
+### 12.3 該当2 stationの全listingを直接確認 — 単一commodityの異常ではなく、station全体が系統的に破損
+
+```text
+J8V-06B（tritium destination, market_id=3710775808）: 18品目
+  上位sell_price: mysteriousidol=300,623, m_tissuesample_nerves=300,473,
+                  earthrelics=300,400, p_particulatesample=300,325,
+                  ancientkey=300,058
+  → 全く無関係なアイテム（探索収集品・exobiologyサンプル名の誤送信混入・
+    クエスト系アイテム）が約300,000CR前後にクラスタリング
+
+Heck Silo（gold destination, market_id=4223685123）: 112品目
+  rhodplumsite=822,175（実相場約25-30万）, iridium=645,815（実相場約5.5万）,
+  platinum=228,661（実相場約4.5-5万）, osmium=207,242（実相場約3-4万）
+  → ほぼ全ての高額commodityが実際の相場の約3〜5倍
+```
+
+**単一commodityの偶発的な外れ値ではなく、station全体が系統的にデータ破損している。** T4-C §10.3で確認したCommodity Master照合（0.045%のmalformed rate）は「commodity名」の妥当性だけを見ており、**「価格の妥当性」は別次元でチェックされていなかった**——今回のAccuracy Checkで初めてこのギャップが明らかになった。
+
+### 12.4 対比: P95以内で見つかった「もっともらしい」正常な高利益destination
+
+```text
+tritium: sell_price=57,840（P95）demand=202,990  station='Many Made This Light'  system='Scorpii Sector GW-W c1-10'
+gold:    sell_price=54,779（P95）demand=1,183    station='Cheranovsky City'      system='Ngurii'
+```
+
+これらは母集団の分布内（P95以下）に収まっており、少なくとも価格面では「破損データによる特異値」という証拠は見られない——ユーザーのExit Criteria「少なくとも1件の高利益だが正常なTrade」「少なくとも1件の高利益だが特殊Marketなので除外」の両方の具体例が得られた。ただし、これらも外部ソースでの裏取りはできていないため、「正常」の確証度合いはあくまで統計的な相対評価に留まる。
+
+### 12.5 結論: Market Classificationは2軸が必要（station構造 + 価格妥当性）
+
+```text
+軸1: station構造（T4-D §11.3で導入済み）
+  通常の双方向market / Colonisation Ship等の一方向depot
+
+軸2: 価格妥当性（今回新たに必要性が判明、未実装）
+  そのstationのcommodity価格が、同commodityの母集団分布内（例: P95以内）に収まっているか
+  station全体で見て、既知の主要commodity（gold/silver等の流動性が高いもの）の価格が
+  母集団中央値から大きく乖離していないか
+```
+
+**「10品目以上の買取可能listing」という条件だけでは、station構造の異常（Colonisation Ship）は検出できても、価格そのものの破損（今回発見したJ8V-06B・Heck Silo）は検出できない。** ユーザー指摘の通り、これを最終仕様として固定するのは危険であり、**station_type分類と価格妥当性チェックを独立した2つの検証軸として設計する**必要がある。具体的な閾値（P95か、station全体の中央乖離率か等）は、今回1日・2 commodityの実証のみでは確定できず、さらなる検証が必要——次段階の課題とする。
+
+### 12.6 T4-D Accuracy Exit Criteria（判定）
+
+```text
+[x] Tritiumの高価格差を独立ソースで確認          → 外部ソース不可、自データセット分布で検証
+[x] Goldの高価格差を独立ソースで確認             → 同上
+[x] Origin priceの一致確認                      → 正常（P44-P76範囲）
+[x] Destination priceの一致確認                  → 異常（P100、母集団の絶対最大値）と判明
+[x] stock / demandの整合確認                     → 破損station側もdemand自体は正の値を持つため
+                                                    demand単独では異常検出不可と判明
+[ ] timestampの鮮度を考慮                        → 未実施
+[x] Profit再計算一致                            → 計算自体は正しく再現可能（問題は入力データ側）
+[x] 少なくとも1件の「高利益だが正常なTrade」      → 12.4の2例
+[x] 少なくとも1件の「高利益だが特殊Marketなので除外」 → 12.3の2例（station構造は正常判定でも価格が破損）
+[x] Market Classificationの必要性を判定          → 2軸（構造+価格妥当性）必要と結論、実装は未着手
+```
+
+**T4-D Accuracy: 部分PASS——「価格が破損したstationは高利益として誤検出されうる」ことを実証し、原因を特定したが、価格妥当性チェック自体の実装・閾値確定はまだ完了していない。** Distance/Jump統合へ進める前に、この価格妥当性チェックを実装するか、閾値の確定なしに暫定的に進めるかは要判断。
