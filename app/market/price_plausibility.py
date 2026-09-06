@@ -96,3 +96,91 @@ def compute_station_median_ratio(
         for station_id, ratios in ratios_by_station.items()
         if len(ratios) >= min_reference_commodities
     }
+
+
+def compute_commodity_percentiles(
+    deduped: dict[tuple[int, str], SellObservation],
+) -> dict[tuple[int, str], float]:
+    """Feature B (design doc §16, "T4-E"): for EVERY (station, commodity)
+    pair, the percentile rank of that station's price within THAT
+    commodity's own population (not the station's basket median).
+    Complementary to compute_station_median_ratio -- §16.3's real
+    finding was that a station can be entirely unremarkable at the
+    station level (median ratio near 1.0) while one specific commodity
+    it sells is the single most extreme value in that commodity's whole
+    population (P100). Station-level aggregation cannot see this; only
+    a per-commodity check can."""
+    prices_by_commodity: dict[str, list[int]] = defaultdict(list)
+    for (_, commodity_name), obs in deduped.items():
+        prices_by_commodity[commodity_name].append(obs.sell_price)
+    sorted_prices = {name: sorted(prices) for name, prices in prices_by_commodity.items()}
+
+    percentiles: dict[tuple[int, str], float] = {}
+    for key, obs in deduped.items():
+        population = sorted_prices[obs.commodity_name]
+        n = len(population)
+        if n == 0:
+            continue
+        below_or_equal = sum(1 for p in population if p <= obs.sell_price)
+        percentiles[key] = below_or_equal / n
+    return percentiles
+
+
+@dataclass(frozen=True)
+class PriceAnomalyAssessment:
+    station_id: int
+    station_median_ratio: float | None  # Feature A -- None if below min_reference_commodities
+    worst_commodity_percentile: float | None  # Feature B -- max percentile among this station's own commodities
+    worst_commodity_name: str | None
+    n_reference_commodities: int
+
+
+def assess_station(
+    station_id: int,
+    deduped: dict[tuple[int, str], SellObservation],
+    station_median_ratio: dict[int, float],
+    commodity_percentiles: dict[tuple[int, str], float],
+) -> PriceAnomalyAssessment:
+    """Assembles both features for one station. Does NOT classify --
+    per the explicit design decision (§16.5) not to fix thresholds
+    before more examples are gathered. Callers apply their own
+    threshold pair via `classify()` below, kept as parameters rather
+    than module constants."""
+    station_commodities = [c for (sid, c) in deduped if sid == station_id]
+    worst_name, worst_pct = None, None
+    for c in station_commodities:
+        pct = commodity_percentiles.get((station_id, c))
+        if pct is not None and (worst_pct is None or pct > worst_pct):
+            worst_pct, worst_name = pct, c
+
+    return PriceAnomalyAssessment(
+        station_id=station_id,
+        station_median_ratio=station_median_ratio.get(station_id),
+        worst_commodity_percentile=worst_pct,
+        worst_commodity_name=worst_name,
+        n_reference_commodities=len(station_commodities),
+    )
+
+
+def classify(
+    assessment: PriceAnomalyAssessment,
+    station_ratio_threshold: float,
+    commodity_percentile_threshold: float,
+) -> str:
+    """Two-axis classification (design doc §16, "T4-E"). Thresholds are
+    caller-supplied, never hardcoded here -- production values remain
+    UNRESOLVED per §14/§16.5 pending more calibration examples."""
+    station_anomalous = (
+        assessment.station_median_ratio is not None and assessment.station_median_ratio >= station_ratio_threshold
+    )
+    commodity_anomalous = (
+        assessment.worst_commodity_percentile is not None
+        and assessment.worst_commodity_percentile >= commodity_percentile_threshold
+    )
+    if station_anomalous and commodity_anomalous:
+        return "STRONG_ANOMALY"
+    if station_anomalous:
+        return "STATION_ANOMALY"
+    if commodity_anomalous:
+        return "COMMODITY_ANOMALY"
+    return "NORMAL"

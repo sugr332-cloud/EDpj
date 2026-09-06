@@ -1,7 +1,7 @@
-# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration）
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 0.9
-**Status:** T4-A/B/C/D完了・Distance/Jump Integration完了（§15）。Threshold Calibration実施中、重複除去バグ修正＋参照commodity拡張により§12.3/§13の一部結論を訂正（§16——station全体の破損という当初結論は選択バイアスによる誤りで、station-level/commodity-level 2指標の併用が必要と判明）。production threshold・duplicate除去含む本番実装は引き続き未確定
+**Version:** 1.0
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。§16でstation-level単指標の誤り（選択バイアス）を訂正。T4-E: Two-Level Classification実装（§17、Feature A健全、Feature Bはtie処理の改良が必要と判明）。production thresholdは意図的に未確定のまま
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -628,3 +628,55 @@ Heck Silo の gold=67,793 → 依然として母集団の絶対最大値（P100�
 ### 16.5 現時点の判断
 
 **production thresholdはまだ確定しない。** 今回の訂正は、拙速な閾値確定を避けるという§13/§14の判断が正しかったことを裏付けている。次段階として、station-level ratioとcommodity-level percentileの2つの指標を组み合わせた分類ロジックを設計し、より多くの実例（複数日、複数commodityカテゴリ）で検証する必要がある。
+
+## 17. T4-E: Two-Level Price Anomaly Classification
+
+### 17.1 実装
+
+`app/market/price_plausibility.py`に以下を追加（12テスト追加、計612テスト）:
+
+```text
+Feature A（station-level）: compute_station_median_ratio（§13、既存）
+Feature B（commodity-level）: compute_commodity_percentiles
+  各(station, commodity)ペアについて、そのcommodity自身の母集団内での価格の順位（percentile）を計算
+PriceAnomalyAssessment: 両特徴量を1 stationにまとめたデータクラス（worst_commodity_percentileはstationが
+  持つ参照commodityの中で最も極端なpercentileを採用）
+classify(): 2軸の閾値（呼び出し側が渡す、モジュール内には固定しない）でNORMAL/STATION_ANOMALY/
+  COMMODITY_ANOMALY/STRONG_ANOMALYの4分類を返す
+```
+
+### 17.2 実データ適用（2026-09-05、n=5,769 station）
+
+```text
+worst_commodity_percentile分布: min=0.004  P50=0.922  P90=0.996  P99=1.000  max=1.000
+```
+
+Heck Siloは`classify()`で明確に`COMMODITY_ANOMALY`（station_median_ratio=1.073は正常域、gold percentile=1.0000のみ異常）に分類され、§16.3の分析と整合した。
+
+### 17.3 新たな問題発見: percentileの同値（tie）処理が低分散commodityで偽陽性を生む
+
+`station_median_ratio<1.2`かつ`worst_commodity_percentile>=0.999`の組み合わせで294件が該当したが、内訳を見ると`gallite`・`indite`・`hydrogenfuel`・`tea`・`polymers`のような**低価格・低分散commodityが異常なほど頻出**していた。原因を確認した:
+
+```text
+gallite:       n=4796  distinct_values=1315  max=13829  同一最大価格のstation数=143（2.98%）
+indite:        n=4183  distinct_values=1195  max=13470  同一最大価格のstation数=80（1.91%）
+hydrogenfuel:  n=5758  distinct_values=58     max=187    同一最大価格のstation数=42（0.73%）
+gold:          n=5467  distinct_values=1990   max=67793  同一最大価格のstation数=1（0.02%、Heck Siloのみ）
+```
+
+**gallite等では、最大価格を143もの独立したstationが同時に達成しており、これは異常ではなくその商品の自然な上限価格に多数のstationが独立に到達しているだけ**（同一の局所経済条件が広く成立しうる、低価格帯のcommodityでよくある現象）。一方goldは最大値を共有するstationがHeck Silo一件のみであり、真に孤立した外れ値だった。
+
+**現在の`compute_commodity_percentiles`（`count(price<=x)/n`という順位ベースの定義、同値は`<=`でカウント）は、この「多数のstationが同一の自然な上限価格に到達する」ケースと「1 stationだけが真に突出した価格を持つ」ケースを区別できていない。** 単純な percentile>=閾値 という条件だけでは、低分散commodityで大量の偽陽性を生む。
+
+### 17.4 現時点の結論
+
+Feature B（commodity-level）は、**「順位」だけでなく「その価格を共有するstation数（同値の多さ）」も見る必要がある**——例えば「percentile>=0.999」に加えて「同一価格帯のstation数が少数（例: 母集団の1%未満）」という条件を組み合わせる、あるいは値ベースの比率（`station_price / P99値`）を使うなど、複数の設計候補がある。**閾値だけでなく、Feature Bの定義自体をもう一段改善する必要がある**と判明した。これも「拙速に閾値を固定しない」という一貫した方針の正しさを裏付ける結果であり、Feature B改良は次段階の課題として記録する。
+
+```text
+T4-E現状:
+  Feature A（station_median_ratio）        → 実装・検証済み、健全
+  Feature B（commodity percentile、素朴な順位） → 実装済みだが、同値ties問題により低分散commodityで
+                                              偽陽性を生むことが判明。定義の改良が必要
+  2軸classify()                            → 実装済み、閾値は未確定
+  production threshold                     → 未確定（意図的）
+```
