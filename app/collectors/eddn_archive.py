@@ -2,8 +2,15 @@
 
 Spec (docs/PHASE_2_5A_MARKET_PREDICTABILITY_IMPLEMENTATION_BASELINE_V0.1.md
 §1/§4): verified real archive at https://edgalaxydata.space/EDDN/, one
-`Commodity-YYYY-MM-DD.jsonl.bz2` per day (~60-112MB compressed), holding
-raw EDDN commodity/3 envelopes going back to 2017-08 — no per-station/
+`Commodity-YYYY-MM-DD.jsonl.bz2` per day (~15-150MB compressed,
+observed to vary substantially day to day — not a fixed range), holding
+raw EDDN commodity/3 envelopes. Historical depth was re-verified
+directly against the live archive (docs/PHASE_TRADE_T4_EDDN_COMMODITY_INITIAL_AUDIT_V0.1.md
+§6): available from at least 2019-01-01 onward (confirmed via HEAD
+request), NOT "since 2017-08" as this docstring previously (incorrectly)
+claimed — 2018-01-01 and earlier probed dates 404. The most recent
+complete day lags "today" by about 1 day (today's own file 404s until
+the next day). No per-station/
 commodity server-side filtering exists, so every query costs a full
 day's download regardless of target. This module streams+decompresses
 one day at a time and reuses `app.collectors.eddn.parse_commodity_message`
