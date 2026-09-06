@@ -177,50 +177,251 @@ class TimeToDecreaseSummary:
     median_time_to_first_decrease: dt.timedelta | None  # over event_count cases only, None if 0
 
 
-def compute_time_to_first_material_decrease(
+@dataclass(frozen=True)
+class MaterialDecreaseEvent:
+    """One real, individual material-decrease occurrence -- Phase
+    2-6F-T2 (docs/PHASE_2_6F_T2_LARGE_PRICE_MOVEMENT_CHARACTERIZATION_
+    DESIGN_BASELINE_V0.1.md §2.1). Kept as the shared, ungrouped record
+    that both the time-to-decrease summary (this module) and the
+    commodity/station breakdowns, demand correlation, and reversion
+    analysis (2-6F-T2) are all built from -- one extraction pass, not
+    duplicated scanning logic per downstream question."""
+
+    station_id: int
+    commodity_name: str
+    t0: dt.datetime
+    t0_price: int
+    t0_demand: int
+    event_observed_at: dt.datetime
+    event_price: int
+    event_demand: int
+    relative_decrease: float
+    time_to_event: dt.timedelta
+    gap_before_event: dt.timedelta  # event_observed_at minus the observation immediately before it
+
+
+@dataclass(frozen=True)
+class CensoredCase:
+    """A T0 that never saw a qualifying material decrease before its
+    series' last observation -- right-censored there, per spec §4, not
+    treated as proof of indefinite stability."""
+
+    station_id: int
+    commodity_name: str
+    t0: dt.datetime
+    time_to_censoring: dt.timedelta  # last observation in the series minus t0
+
+
+def collect_material_decrease_events(
     session: Session, threshold: float = MATERIAL_DECREASE_RELATIVE_THRESHOLD
-) -> TimeToDecreaseSummary:
+) -> tuple[list[MaterialDecreaseEvent], list[CensoredCase]]:
     """For each T0 with at least one later observation in its series,
     scans forward chronologically for the first later observation
-    satisfying the material-decrease criterion. If none is found before
-    the series' last observation, the case is right-censored there --
-    never treated as proof the price would never have dropped (spec
-    §4: "a price with no observed decrease is not treated as proof of
-    indefinite stability")."""
-    cases: list[TimeToDecreaseCase] = []
+    satisfying the material-decrease criterion. A T0 with no qualifying
+    later observation before its series' last observation becomes a
+    CensoredCase instead of a MaterialDecreaseEvent -- no event actually
+    occurred there, so it must never be represented as one."""
+    events: list[MaterialDecreaseEvent] = []
+    censored: list[CensoredCase] = []
     for (station_id, commodity_name), rows in _rows_by_station_commodity(session).items():
         for i, t0_row in enumerate(rows[:-1]):
             if t0_row.sell_price <= 0:
                 continue  # undefined relative decrease, excluded (not fabricated as "no decrease")
             found = None
-            for later_row in rows[i + 1 :]:
+            found_index = None
+            for j, later_row in enumerate(rows[i + 1 :], start=i + 1):
                 if _is_material_decrease(t0_row.sell_price, later_row.sell_price, threshold):
                     found = later_row
+                    found_index = j
                     break
-            if found is not None:
-                cases.append(
-                    TimeToDecreaseCase(
-                        station_id=station_id, commodity_name=commodity_name, t0=t0_row.observed_at,
-                        time_to_event=_naive(found.observed_at) - _naive(t0_row.observed_at), censored=False,
-                    )
-                )
-            else:
+            if found is None:
                 last_row = rows[-1]
-                cases.append(
-                    TimeToDecreaseCase(
+                censored.append(
+                    CensoredCase(
                         station_id=station_id, commodity_name=commodity_name, t0=t0_row.observed_at,
-                        time_to_event=_naive(last_row.observed_at) - _naive(t0_row.observed_at), censored=True,
+                        time_to_censoring=_naive(last_row.observed_at) - _naive(t0_row.observed_at),
                     )
                 )
+                continue
+            preceding = rows[found_index - 1]
+            events.append(
+                MaterialDecreaseEvent(
+                    station_id=station_id,
+                    commodity_name=commodity_name,
+                    t0=t0_row.observed_at,
+                    t0_price=t0_row.sell_price,
+                    t0_demand=t0_row.demand,
+                    event_observed_at=found.observed_at,
+                    event_price=found.sell_price,
+                    event_demand=found.demand,
+                    relative_decrease=(t0_row.sell_price - found.sell_price) / t0_row.sell_price,
+                    time_to_event=_naive(found.observed_at) - _naive(t0_row.observed_at),
+                    gap_before_event=_naive(found.observed_at) - _naive(preceding.observed_at),
+                )
+            )
+    return events, censored
 
-    events = [c.time_to_event for c in cases if not c.censored]
-    median = statistics.median(events) if events else None
+
+def compute_time_to_first_material_decrease(
+    session: Session, threshold: float = MATERIAL_DECREASE_RELATIVE_THRESHOLD
+) -> TimeToDecreaseSummary:
+    """Same result shape as before collect_material_decrease_events()
+    existed -- this is now a thin summary over its output, no re-scan."""
+    events, censored = collect_material_decrease_events(session, threshold)
+    cases = [
+        TimeToDecreaseCase(
+            station_id=e.station_id, commodity_name=e.commodity_name, t0=e.t0,
+            time_to_event=e.time_to_event, censored=False,
+        )
+        for e in events
+    ] + [
+        TimeToDecreaseCase(
+            station_id=c.station_id, commodity_name=c.commodity_name, t0=c.t0,
+            time_to_event=c.time_to_censoring, censored=True,
+        )
+        for c in censored
+    ]
+
+    event_times = [e.time_to_event for e in events]
+    median = statistics.median(event_times) if event_times else None
     return TimeToDecreaseSummary(
         cases=cases,
         event_count=len(events),
-        censored_count=sum(1 for c in cases if c.censored),
+        censored_count=len(censored),
         median_time_to_first_decrease=median,
     )
+
+
+@dataclass(frozen=True)
+class GroupMoveSummary:
+    """Phase 2-6F-T2 §2.2: a group (one commodity, or one station) only
+    appears here if at least one MaterialDecreaseEvent actually occurred
+    for it -- a group with zero events is simply absent, never
+    synthesized as a zero-event row (same convention as
+    freshness_evaluation.aggregate_by_freshness_bucket)."""
+
+    key: str | int
+    event_count: int
+    median_relative_decrease: float
+    median_time_to_event: dt.timedelta
+
+
+def _summarize_events(events: list[MaterialDecreaseEvent], key_fn) -> dict:
+    by_key: dict = defaultdict(list)
+    for event in events:
+        by_key[key_fn(event)].append(event)
+    return {
+        key: GroupMoveSummary(
+            key=key,
+            event_count=len(group),
+            median_relative_decrease=statistics.median(e.relative_decrease for e in group),
+            median_time_to_event=statistics.median(e.time_to_event for e in group),
+        )
+        for key, group in by_key.items()
+    }
+
+
+def summarize_events_by_commodity(events: list[MaterialDecreaseEvent]) -> dict[str, GroupMoveSummary]:
+    return _summarize_events(events, lambda e: e.commodity_name)
+
+
+def summarize_events_by_station(events: list[MaterialDecreaseEvent]) -> dict[int, GroupMoveSummary]:
+    return _summarize_events(events, lambda e: e.station_id)
+
+
+@dataclass(frozen=True)
+class DemandCorrelationResult:
+    """Directional only (§2.3 of the design doc) -- a full correlation
+    coefficient would overstate precision the likely-small real event
+    count doesn't support."""
+
+    event_count: int
+    demand_decreased_count: int
+    demand_increased_count: int
+    demand_unchanged_count: int
+
+
+def compute_demand_change_at_events(events: list[MaterialDecreaseEvent]) -> DemandCorrelationResult:
+    decreased = sum(1 for e in events if e.event_demand < e.t0_demand)
+    increased = sum(1 for e in events if e.event_demand > e.t0_demand)
+    unchanged = sum(1 for e in events if e.event_demand == e.t0_demand)
+    return DemandCorrelationResult(
+        event_count=len(events), demand_decreased_count=decreased,
+        demand_increased_count=increased, demand_unchanged_count=unchanged,
+    )
+
+
+class ReversionOutcome(str, Enum):
+    REVERTED = "REVERTED"
+    PERSISTED = "PERSISTED"
+    CENSORED = "CENSORED"
+
+
+@dataclass(frozen=True)
+class ReversionCase:
+    event: MaterialDecreaseEvent
+    outcome: ReversionOutcome
+    time_to_reversion: dt.timedelta | None  # only set when outcome is REVERTED
+
+
+# The inverse of MATERIAL_DECREASE_RELATIVE_THRESHOLD (0.05): if a 5%
+# drop counts as "a material decrease", recovering to 95% of the
+# pre-event price counts as "back to normal" -- reusing the same frozen
+# number rather than inventing an independent threshold.
+REVERSION_RECOVERY_RATIO = 1 - MATERIAL_DECREASE_RELATIVE_THRESHOLD
+
+
+def compute_price_reversion(
+    session: Session,
+    events: list[MaterialDecreaseEvent],
+    reversion_window: dt.timedelta = dt.timedelta(hours=24),
+    recovery_ratio: float = REVERSION_RECOVERY_RATIO,
+) -> list[ReversionCase]:
+    """For each event, looks only at observations strictly after
+    `event_observed_at` and at or before `event_observed_at +
+    reversion_window` (never later -- future leakage guard). REVERTED if
+    any of those observations reaches `>= recovery_ratio * t0_price`.
+    Otherwise: PERSISTED if at least one later observation exists in
+    that window (price stayed down, actually observed), or CENSORED if
+    none exists at all (no evidence either way -- never assumed to mean
+    "stayed down forever")."""
+    by_pair = _rows_by_station_commodity(session)
+    cases: list[ReversionCase] = []
+    for event in events:
+        rows = by_pair[(event.station_id, event.commodity_name)]
+        window_end = _naive(event.event_observed_at) + reversion_window
+        later_rows = [r for r in rows if _naive(event.event_observed_at) < _naive(r.observed_at) <= window_end]
+        recovery_target = recovery_ratio * event.t0_price
+
+        reverted_row = next((r for r in later_rows if r.sell_price >= recovery_target), None)
+        if reverted_row is not None:
+            cases.append(
+                ReversionCase(
+                    event=event, outcome=ReversionOutcome.REVERTED,
+                    time_to_reversion=_naive(reverted_row.observed_at) - _naive(event.event_observed_at),
+                )
+            )
+        elif later_rows:
+            cases.append(ReversionCase(event=event, outcome=ReversionOutcome.PERSISTED, time_to_reversion=None))
+        else:
+            cases.append(ReversionCase(event=event, outcome=ReversionOutcome.CENSORED, time_to_reversion=None))
+    return cases
+
+
+def compute_buy_side_movement_status(session: Session) -> PersistenceMeasurementStatus:
+    """Whether buy-side (source station Buy price) movement can be
+    characterized at all. Same structural gap as
+    compute_profit_condition_persistence (design doc §2.5) -- `buy_price`
+    was never captured for most existing rows (backfill Deferred,
+    docs/PHASE_2_6F_T1... §10). INSUFFICIENT here is not a new decision,
+    just the same one applied to a second metric."""
+    has_buy_price = (
+        session.query(MarketHistoricalObservation)
+        .filter(MarketHistoricalObservation.buy_price.isnot(None))
+        .first()
+        is not None
+    )
+    return PersistenceMeasurementStatus.COMPUTED if has_buy_price else PersistenceMeasurementStatus.INSUFFICIENT
 
 
 class PersistenceMeasurementStatus(str, Enum):
