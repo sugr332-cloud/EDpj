@@ -161,6 +161,8 @@ demand_unchanged_count=667（96.7%）
 status = INSUFFICIENT（buy_price未収集、2-6F-T1 §10と同じ理由）
 ```
 
+**2026-09-06追記（バックフィル実施後）**: `docs/PHASE_2_6F_T1_...md` §11で`buy_price`のバックフィルを実施した結果、`compute_buy_side_movement_status`は`COMPUTED`を返すようになった（`buy_price`自体は判明済み）。ただし、実際にBuy側とSell側を組み合わせたTrade利益条件そのものは、2 station間でcommodityの共通集合が無いため依然として計算不能——詳細は`docs/PHASE_2_6F_T3_...md` §6.1/§8参照。
+
 **読み取れること（実データ、station多様性の制約あり）**:
 
 1. **`biowaste`のmedian_decrease=0.500は他商品から明確に外れている**——他の大半は5〜25%に収まる中、突出して大きい。個別に調査する価値がある外れ値。

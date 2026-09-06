@@ -162,10 +162,41 @@ compute_data_quality_reportが、1系列のみで観測が1件しかない場合
         （実現Tradeデータ収集方法の設計が次の課題）
 ```
 
-## 11. 決定事項サマリ
+## 11. バックフィル実施結果（2026-09-06、Deferredから実施へ方針転換）
+
+§10で保留したバックフィルを、ユーザーの判断により実施した——「価格がどれだけ持続するか」だけでなく「利益条件がどれだけ持続するか」を計算するのが本来の目的であり、その計算が可能になるかを実際に確認する段階に進んだため。
+
+**実施内容**: `app/market/predictability.py`の`ensure_days_fetched_batch`が`upsert_ignore`を使っていたため、既にfetch済みの日付を再取得しても既存行が上書きされない構造的な欠陥を先に修正した（`upsert_preserve_columns`に変更、commit `3eaea1c`）。その上で、既知の34ターゲット・15日分の`MarketHistoricalFetchLog`を削除して強制的に再取得し、実際に`edgalaxydata.space`から約1〜1.7GBのアーカイブを再ダウンロードした。
+
+**結果**:
+
+```text
+total_rows: 1784 → 2496（同じ34ターゲットに対し、より広い範囲を再取得した結果、行数が増加）
+null buy_price:      0（backfill前は2496件相当が全てNULLだった）
+zero buy_price:    328（station がそのcommodityを買わない、という正当な事実）
+positive buy_price: 2168
+null received_at:    0
+```
+
+`buy_price`/`supply`/`received_at`は完全に埋まった。
+
+**しかし、新たな構造的な壁が見つかった**: `compute_profit_condition_persistence`を6ウィンドウ全てで再実行した結果、**`eligible_count=0`のまま**だった——`buy_price`が手に入ったにもかかわらず、である。原因を調査したところ:
+
+```text
+station 3221821952 の commodity集合: {advancedcatalysers, ..., uranium} （30品目）
+station 3789719552 の commodity集合: {battleweapons, nonlethalweapons, reactivearmour, scrap} （4品目）
+共通するcommodity: 集合が空（0件）
+```
+
+**現在実データとして存在する2つのstationは、Buy→輸送→Sellが成立する共通のcommodityを1つも持たない。** これは「データが足りない」という問題ではなく、**「そもそも成立しうるTradeルートが現在の観測データの中に存在しない」という、バックフィルでは解決できない別種の構造的制約**である。`compute_buy_side_movement_status`（2-6F-T2）は`buy_price`の存在自体は確認するため`COMPUTED`を返すが、`compute_profit_condition_persistence`/`compute_profit_window_stats`/`compute_margin_change_decomposition`は経路が1つも組めないため、6ウィンドウ全てで`eligible_count=0`・`INSUFFICIENT`のまま変わらない。
+
+**含意**: この制約は、同じ2 stationのデータをどれだけ追加でバックフィルしても解消しない。解消するには、station多様性そのものの改善（`docs/MARKET_DATA_TRUSTWORTHINESS_REEVALUATION_V0.1.md`・2-6F-T3 §7-Dで既に指摘済みの「実質2 stationしかない」という同じ制約）——具体的には、既存2 stationのいずれかと共通commodityを持つ第3のstationの実データが必要になる。これは実プレイ（新しいstationへのDocking）を待つ以外に増やす方法が無い、Phase 2-6Bの「station多様性天井」と全く同じ性質の制約である。
+
+## 12. 決定事項サマリ
 
 1. **§1 Tradeの価格持続性は実データで即座に評価可能**——MiningやBioと異なり実観測1784行が既に存在する
 2. **§2 profit_condition_persistenceは列不足で構造的にブロックされている**——ただしMiningのCargoState問題とは異なり、原因はアーカイブ側の情報を捨てていたことであり、今後のfetchから直せる軽微な修正
 3. **§3 material decrease閾値は既存の`STABLE_MEDIAN_PRICE_CHANGE=0.05`を再利用**——新しい閾値を結果を見る前に発明しない、既存のレビュー済み判断を流用する
 4. **§6 profit_condition_persistenceはコードとしては実装するが、実行結果は正直に`INSUFFICIENT`**——コードが動くことと指標が計算できることは別
 5. **§10 バックフィルはDeferred**——コスト（約1〜1.7GB）に見合う次のボトルネック解消（Trade Formula Validation）にはならないため、実現Tradeデータ収集の設計段階まで持ち越す。`INSUFFICIENT`はPhaseの失敗ではなく正しい分類
+6. **§11 バックフィルは実施済み、しかし新たな構造的制約が判明**——`buy_price`/`supply`/`received_at`は完全に取得できたが、現在実データとして存在する2 stationはcommodityの共通集合が空であり、Trade利益条件の計算自体が成立しない。これはバックフィルでは解消できない、station多様性そのものの制約であり、Phase 2-6Bと同じ「実プレイでstationが増えるのを待つ」ことでしか解消しない
