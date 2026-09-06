@@ -214,6 +214,27 @@ def assess_station(
     )
 
 
+def _is_commodity_anomalous(
+    stats: CommodityPriceStats,
+    commodity_percentile_threshold: float,
+    commodity_max_tie_share_threshold: float,
+    commodity_value_ratio_threshold: float,
+    commodity_absolute_floor: float | None,
+) -> bool:
+    """Shared per-commodity conjunction (§17.3/§17.4, extended by §20's
+    optional floor) -- used by both classify() (on the single "worst"
+    commodity) and compute_station_anomaly_profile() (on EVERY reference
+    commodity a station sells, per §23's group-structure design)."""
+    anomalous = (
+        stats.percentile >= commodity_percentile_threshold
+        and stats.max_tie_share <= commodity_max_tie_share_threshold
+        and stats.value_ratio >= commodity_value_ratio_threshold
+    )
+    if anomalous and commodity_absolute_floor is not None:
+        anomalous = stats.value_difference_absolute >= commodity_absolute_floor
+    return anomalous
+
+
 def classify(
     assessment: PriceAnomalyAssessment,
     station_ratio_threshold: float,
@@ -255,13 +276,10 @@ def classify(
     commodity_anomalous = False
     stats = assessment.worst_commodity_stats
     if stats is not None:
-        commodity_anomalous = (
-            stats.percentile >= commodity_percentile_threshold
-            and stats.max_tie_share <= commodity_max_tie_share_threshold
-            and stats.value_ratio >= commodity_value_ratio_threshold
+        commodity_anomalous = _is_commodity_anomalous(
+            stats, commodity_percentile_threshold, commodity_max_tie_share_threshold,
+            commodity_value_ratio_threshold, commodity_absolute_floor,
         )
-        if commodity_anomalous and commodity_absolute_floor is not None:
-            commodity_anomalous = stats.value_difference_absolute >= commodity_absolute_floor
 
     if station_anomalous and commodity_anomalous:
         return "STRONG_ANOMALY"
@@ -329,3 +347,83 @@ def compute_persistence(
             persistence_ratio=anomaly_days / observed_days,
         )
     return result
+
+
+@dataclass(frozen=True)
+class CommodityAnomalyDetail:
+    commodity_name: str
+    stats: CommodityPriceStats
+
+
+@dataclass(frozen=True)
+class StationAnomalyProfile:
+    """Feature B v4 (design doc §23, "T4-E group structure") --
+    diagnostic only, not yet wired into classify(). §22's transient-
+    candidate investigation found that "commodity-level anomaly"
+    (Feature B, judged on a single "worst" commodity) cannot tell apart
+    two structurally different real patterns:
+
+      Heck Silo (gold):        1 unrelated commodity spikes, everything
+                                else at the station is unremarkable
+      mining-hotspot stations: MANY related high-value minerals
+                                (platinum, osmium, painite, palladium,
+                                gold, silver, ...) are ALL elevated
+                                together, consistently across days --
+                                a real, explainable local market
+                                condition, not corruption
+
+    `anomalous_commodity_count` counts every one of a station's own
+    reference commodities that independently satisfies
+    _is_commodity_anomalous (not just the single "worst" one that
+    PriceAnomalyAssessment/classify() look at) -- Heck Silo should
+    score close to 1, hotspot stations should score much higher.
+    `anomaly_value_concentration` = the single largest
+    value_difference_absolute among the anomalous set, divided by
+    their sum -- close to 1.0 means one commodity accounts for nearly
+    all of the "anomaly budget" (Heck Silo shape); much lower than 1.0
+    means the anomaly is spread across several commodities (hotspot
+    shape). None when no commodity is anomalous."""
+
+    station_id: int
+    anomalous_commodities: tuple[CommodityAnomalyDetail, ...]
+    anomalous_commodity_count: int
+    anomaly_value_concentration: float | None
+
+
+def compute_station_anomaly_profile(
+    station_id: int,
+    deduped: dict[tuple[int, str], SellObservation],
+    commodity_stats: dict[tuple[int, str], CommodityPriceStats],
+    commodity_percentile_threshold: float,
+    commodity_max_tie_share_threshold: float,
+    commodity_value_ratio_threshold: float,
+    commodity_absolute_floor: float | None = None,
+) -> StationAnomalyProfile:
+    """Evaluates EVERY reference commodity the station sells (not just
+    the single "worst" one assess_station() picks) against the same
+    per-commodity conjunction classify() uses, so the group structure
+    of the anomaly (one commodity vs. several) can be examined."""
+    station_commodities = [c for (sid, c) in deduped if sid == station_id]
+    anomalous: list[CommodityAnomalyDetail] = []
+    for c in station_commodities:
+        stats = commodity_stats.get((station_id, c))
+        if stats is None:
+            continue
+        if _is_commodity_anomalous(
+            stats, commodity_percentile_threshold, commodity_max_tie_share_threshold,
+            commodity_value_ratio_threshold, commodity_absolute_floor,
+        ):
+            anomalous.append(CommodityAnomalyDetail(commodity_name=c, stats=stats))
+
+    concentration = None
+    if anomalous:
+        total = sum(d.stats.value_difference_absolute for d in anomalous)
+        if total > 0:
+            concentration = max(d.stats.value_difference_absolute for d in anomalous) / total
+
+    return StationAnomalyProfile(
+        station_id=station_id,
+        anomalous_commodities=tuple(anomalous),
+        anomalous_commodity_count=len(anomalous),
+        anomaly_value_concentration=concentration,
+    )

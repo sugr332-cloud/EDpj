@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.4
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2/v3実装（§17-20）。Multi-day Stability Validation実施（§19、persistenceを異常度指標に使うべきでないと判明）。Commodity Absolute Floor Calibration Study実施（§21）——floor=10,000〜20,000CRの範囲に絞り込み（低価格ノイズ100%除去・既知正例保持を両立）。production thresholdは引き続き未確定（範囲の絞り込みに留める）
+**Version:** 1.5
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2/v3/v4実装（§17-23）。Persistence診断化・floor絞り込み（10-20kCR）・一過性候補裏取り・commodity群相関構造の実装まで完了。**Heck Silo型の明確な単一commodity破損はまだ1件も確定できていない**（Heck Silo自体も当初想定より曖昧と判明）——正直に記録。production thresholdは引き続き未確定
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -869,3 +869,60 @@ floor候補（None, 500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 2500
 ### 21.4 結論
 
 **floor=10,000〜20,000CRの範囲内であれば、低価格ノイズを完全に除去しつつ、既知の唯一の正例（Heck Silo）を保持できる**ことを実データで確認した。**ただし、この範囲を「production threshold確定」とはしない**——確認済み正例が1件のみという証拠の弱さ、複数日での再検証未実施、一過性候補の裏取り未実施という限界があるため。§20.3で挙げた3つの残課題（persistence診断化・一過性候補裏取り・floor比較）のうち3番目が完了し、範囲の絞り込みという形で前進した。次段階は残る2課題（persistence診断情報化、一過性候補の個別裏取り）に進む。
+
+## 22. Persistence診断情報の実装と一過性候補の個別裏取り
+
+### 22.1 Persistence診断情報（分類ロジックには不使用）
+
+`PersistenceInfo`（`station_id`, `anomaly_days`, `observed_days`, `persistence_ratio`）と`compute_persistence()`を実装。**§19で「持続性が高いほど破損の確度が高い」という仮説が否定されたことを踏まえ、`classify()`には一切組み込まない**——モジュールのdocstringとfunctionのdocstring双方に、この設計判断の理由（§19の否定結果）を明記した。6テスト追加。
+
+### 22.2 一過性候補の実データ抽出・個別裏取り
+
+floor=15,000CRを適用し、7日間（§19と同じウィンドウ）で「1日だけCOMMODITY_ANOMALY判定・観測日数3日以上」という一過性候補を抽出した結果、**87件**該当した。station_median_ratioは全て0.98〜1.13付近と正常範囲。
+
+上位候補4件（`Levi-Montalcini Gateway`, `Anvil Platform`他）の実際のcommodity listingを直接確認したが、**いずれもHeck Silo型（無関係な単一commodityの孤立した急騰）ではなく、既に確認済みの「複数の関連する希少鉱物が同時に高値」という採掘拠点型パターンだった**（platinum・osmium・painite・lowtemperaturediamond・palladium・gold・silver等が全てbuy=0/supply=0かつ高demandで同時に高騰、複数日にわたって類似の価格帯を維持）。「1日だけ検出」は市場が1日しか存在しなかったのではなく、**統計的閾値の境界を日によって跨いだだけ**であることが確認できた。
+
+**結論**: 今回サンプリングした一過性候補の範囲では、Heck Silo型の真の破損パターンは新たに発見できなかった。これは失敗ではなく、**現行のFeature A/B（単一の「最も悪いcommodity」だけを見る設計）では、市場構造上の正当な変動とデータ破損を十分に区別できていない**ことを実データで示した重要な結果として記録する。
+
+## 23. Feature B v4: Commodity群の相関構造
+
+### 23.1 設計動機と実装
+
+§22の裏取りで判明した通り、Heck Silo型（無関係な単一commodityが孤立して突出）と採掘拠点型（複数の関連する高額鉱物が同時に高騰）は、**異常の大きさではなくcommodity間の相関構造が異なる**。これを診断できるよう、`StationAnomalyProfile`（`anomalous_commodity_count`, `anomaly_value_concentration`）と`compute_station_anomaly_profile()`を実装した——**分類ロジック（`classify()`）にはまだ組み込まない、純粋な診断情報**。
+
+```text
+anomalous_commodity_count : そのstationが持つ参照commodityのうち、個別に異常判定される数
+anomaly_value_concentration : 異常判定された中で最大のvalue_difference_absoluteが、
+                               それらの合計に占める割合（1.0に近いほど単一commodityに集中、
+                               低いほど複数commodityに分散）
+```
+
+`classify()`と`compute_station_anomaly_profile()`が同じper-commodity判定条件を共有するよう、`_is_commodity_anomalous()`という内部ヘルパーへ共通化した。6テスト追加（Heck Silo型・採掘拠点型を模した合成データで、`count`と`concentration`の分離を検証）。計633テスト。
+
+### 23.2 実データでの検証: 想定より複雑な結果
+
+Heck Silo自体を実データで評価したところ、**当初の想定（gold単体のみ異常）とは異なる結果**が出た:
+
+```text
+Heck Silo: anomalous_commodity_count=2  concentration=0.537
+    gold:      ratio=1.42  diff=20,130CR
+    palladium: ratio=1.32  diff=17,390CR
+```
+
+**gold単体ではなく、gold+palladium（共に貴金属）の2commodityが同時に異常判定されていた。** これはHeck Siloが§13〜21で想定していたほど「純粋な単一commodityの孤立した異常」ではなく、むしろ2つの関連貴金属が中程度に相関して高騰しているケースであることを意味する——当初の説明を訂正する。
+
+同じデータセット内で`anomalous_commodity_count>=3`のstationを検索したところ、**31件該当し、上位5件は`cobalt`・`osmium`・`painite`・`platinum`という同一4commodity・ほぼ同一倍率**（osmium ratio≈5.73、platinum ratio≈5.10等、station間で小数点以下まで酷似）**で異常判定されていた**（concentration≈0.38、4commodityに分散）:
+
+```text
+Webster Productions/Scorpii Sector BG-X b1-1, Fiennes Town/Scorpii Sector BG-X b1-1,
+Clarity Landing/Scorpii Sector BG-X b1-1（同一system内3station）,
+Glashow Relay/Wredguia UH-U c16-9, Hq Of Vogz/14 Ceti
+```
+
+**複数の異なるstation（一部は異なるsystem）が、独立に全く同一のcommodity群・ほぼ同一の倍率で「異常」を示している。** これは各stationが独立にデータ破損しているのではなく、**銀河規模の共有された経済条件（一時的なイベント等）を反映している可能性が非常に高い**——独立した破損であれば、station間でここまで倍率が一致することは考えにくい。
+
+### 23.3 結論
+
+`anomalous_commodity_count`/`anomaly_value_concentration`は、Heck Silo（count=2, concentration=0.537）と採掘拠点型（count=4, concentration=0.38）の間で**期待した方向の差**（数が少なく集中度が高いほどHeck Silo寄り）を示したが、**分離は当初の合成データ検証ほど劇的ではなかった**——Heck Silo自体が完全な「count=1の孤立例」ではなかったため。また、複数stationにわたる同一パターンの再現という、当初想定していなかった新たな判別材料（**独立した複数stationが同一の異常パターンを示す場合は、破損ではなく共有された実市場条件である可能性が高い**）が実データから得られた——これも診断情報として今後活用できる。
+
+**production thresholdは引き続き未確定。** 本フェーズを通じて、「明確な単一commodity型のデータ破損」の実例はまだ1件も確定できていない（Heck Siloも当初想定より曖昧）——これは仕様・検証記録として正直に残す。次段階は、(a) 複数station間のcommodity群一致を診断情報としてさらに定式化する、(b) このままThreshold Calibrationへ進み閾値を暫定的に確定した上で本番接続前の最終検証とする、のいずれかを検討する。

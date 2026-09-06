@@ -12,6 +12,7 @@ from app.market.price_plausibility import (
     compute_commodity_stats,
     compute_global_medians,
     compute_persistence,
+    compute_station_anomaly_profile,
     compute_station_median_ratio,
     dedupe_latest,
 )
@@ -465,3 +466,97 @@ class TestComputePersistence:
         daily_observed = [set()]  # station 1 wasn't in the observed set that day
         with pytest.raises(ValueError):
             compute_persistence(daily_anomalies, daily_observed)
+
+
+class TestComputeStationAnomalyProfile:
+    """Feature B v4 (§23): distinguishes Heck Silo's shape (1 unrelated
+    commodity spikes) from the real mining-hotspot shape (§22's
+    transient-candidate finding: several related high-value minerals
+    elevated together) -- diagnostic only, not consumed by classify()."""
+
+    BASELINE = {"gold": 45000, "silver": 33000, "platinum": 59000, "painite": 55000, "osmium": 47000, "tritium": 53000}
+    KWARGS = dict(commodity_percentile_threshold=0.99, commodity_max_tie_share_threshold=0.05,
+                  commodity_value_ratio_threshold=1.3)
+
+    def _build_population(self, heck_silo_station: int, hotspot_station: int):
+        deduped = {}
+        # 150 background stations per commodity: two special stations
+        # (Heck-Silo-like and hotspot-like) share "gold" in this fixture,
+        # so whichever of them is second-highest still needs percentile
+        # >=0.99 -- with n background stations that requires
+        # (n+1)/(n+2)>=0.99, i.e. n>=98; 150 gives comfortable margin.
+        # Also keeps tie_share for a lone outlier (1/152 ~= 0.7%) well
+        # under a 5% threshold.
+        for commodity, base in self.BASELINE.items():
+            for i in range(150):
+                deduped[(100 + i, commodity)] = SellObservation(100 + i, commodity, base + i * 3, 10, T0)
+
+        # Heck-Silo-like station: ONLY gold spikes, everything else normal.
+        deduped[(heck_silo_station, "gold")] = SellObservation(heck_silo_station, "gold", 250000, 10, T0)
+        for commodity in ["silver", "platinum", "painite", "osmium", "tritium"]:
+            deduped[(heck_silo_station, commodity)] = SellObservation(heck_silo_station, commodity, self.BASELINE[commodity], 10, T0)
+
+        # mining-hotspot-like station: ALL related minerals elevated together
+        for commodity, base in self.BASELINE.items():
+            deduped[(hotspot_station, commodity)] = SellObservation(hotspot_station, commodity, int(base * 2.2), 10, T0)
+
+        global_median = compute_global_medians({k: v for k, v in deduped.items() if k[0] >= 100})
+        return deduped, global_median
+
+    def test_heck_silo_shape_has_low_anomalous_commodity_count(self):
+        deduped, global_median = self._build_population(heck_silo_station=1, hotspot_station=2)
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(1, deduped, commodity_stats, **self.KWARGS)
+
+        assert profile.anomalous_commodity_count == 1
+        assert profile.anomalous_commodities[0].commodity_name == "gold"
+
+    def test_mining_hotspot_shape_has_high_anomalous_commodity_count(self):
+        deduped, global_median = self._build_population(heck_silo_station=1, hotspot_station=2)
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(2, deduped, commodity_stats, **self.KWARGS)
+
+        assert profile.anomalous_commodity_count == len(self.BASELINE)  # all 6 elevated together
+
+    def test_heck_silo_shape_has_high_value_concentration(self):
+        # one commodity accounts for ~all of the "anomaly budget"
+        deduped, global_median = self._build_population(heck_silo_station=1, hotspot_station=2)
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(1, deduped, commodity_stats, **self.KWARGS)
+
+        assert profile.anomaly_value_concentration == 1.0  # only one anomalous commodity at all
+
+    def test_mining_hotspot_shape_has_lower_value_concentration(self):
+        # the anomaly "budget" is spread across several commodities, not
+        # dominated by a single one
+        deduped, global_median = self._build_population(heck_silo_station=1, hotspot_station=2)
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(2, deduped, commodity_stats, **self.KWARGS)
+
+        assert profile.anomaly_value_concentration < 0.5
+
+    def test_no_anomalous_commodities_gives_none_concentration(self):
+        deduped = {(1, "gold"): SellObservation(1, "gold", 45000, 10, T0)}
+        global_median = {"gold": 45000}
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(1, deduped, commodity_stats, **self.KWARGS)
+
+        assert profile.anomalous_commodity_count == 0
+        assert profile.anomaly_value_concentration is None
+
+    def test_absolute_floor_is_respected_in_group_profile(self):
+        # same floor mechanism as classify() -- a cheap-commodity
+        # trivial swing must not count toward anomalous_commodity_count.
+        deduped, global_median = self._build_population(heck_silo_station=1, hotspot_station=2)
+        commodity_stats = compute_commodity_stats(deduped, global_median)
+
+        profile = compute_station_anomaly_profile(
+            1, deduped, commodity_stats, commodity_absolute_floor=999999999, **self.KWARGS
+        )
+        # no realistic absolute gap clears an intentionally absurd floor
+        assert profile.anomalous_commodity_count == 0
