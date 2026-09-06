@@ -70,14 +70,18 @@ BioObservation総行数:           12,114（重複排除後）
 
 `docs/BIO_SCANORGANIC_DATA_AVAILABILITY_INVESTIGATION_V0.1.md`の速報値（システム数3,380・種数106・属数22）と完全に一致——調査時点のサンプリングと本実装が同じ母集団を正しく捉えていることの追加確認になった。
 
-## 3. `SpeciesValueMaster`: 独自コンパイル
+## 3. `SpeciesValueMaster`: 独自コンパイル（実装済み）
 
 `docs/BIO_SPECIES_VALUE_MASTER_CROSS_REFERENCE_INVESTIGATION_V0.1.md`で発見した10件の不一致の扱い（人間判断、本書で確定）:
 
 - **Fonticulua Fluctus**: EDMC-BioScan側の値（20,000,000）を採用する。Fandom wiki側の`16,777,215`は`2^24-1`という明確なデータ不具合（第3ソースの独立した裏付けあり）。
 - **残り9件（Anemone Croceum、Bacterium Nebulus/Scopulum、Brain Tree×5、Tussock Ventusa）**: 現時点でどちらが正しいか判断する根拠が無いため、**Fandom wiki側の値を暫定採用しつつ、`confidence="disputed"`フラグを立てる**——結果を見てから都合よく選んだわけではなく、調査時点（backtestを実行する前）で確定した方針である。
 
-`app/bio/species_value_master.py`（新規）: 静的dict、`SpeciesValueEntry(name, value, confidence, sources, retrieved_at)`。EDMC-BioScanのコードは一切転記しない——値は本書執筆時点で人間が確認した数値を独自に打ち込む（GPLコードのコピーではなく、事実としての数値の記録）。
+**実装中に発見した11件目**: `app/bio/species_value_master.py`をコンパイルする過程で、`Concha Biconcavis`も`16,777,215`（同じ`2^24-1`不具合）を持っていることが判明した——調査時点では検出できていなかった。独立した第3ソース（`Fonticulua Segmentatus`/`Tussock Stigmasis`と同じ`19,010,800`を支払うという記述）と、既にテーブル内の2種が実際にその値であることから、`19,010,800`に補正した。**この補正はbacktestを一切実行する前に行った**——結果を見てからの後付けではない。
+
+`app/bio/species_value_master.py`（新規、実装済み）: 静的dict、`SpeciesValueEntry(name, value, confidence)`。EDMC-BioScanのコードは一切転記しない——内部codex名↔表示名の対応関係のみをクロスチェック目的で参照し、値そのものは複数ソース照合の結論として独自に記録した（GPLコードのコピーではなく、事実としての数値の記録）。
+
+実データ（`BioObservation`、106種）に対するカバレッジ: **103/106（97.2%）**。未カバー3種（`$Codex_Ent_Vents_Name;`、`$Codex_Ent_Ingensradices_Unicus_Name;`、`$Codex_Ent_Cone_Name;`）は、今回参照した19属のruleset取得範囲に含まれていない、より新しい/珍しい種と考えられる——正直に未カバーとして扱う（0や推測値で埋めない）。
 
 ## 4. Species Prediction Backtest
 
@@ -149,7 +153,7 @@ value formula backtestがspecies predictionのbacktestと独立したコード�
 ## 7. Exit Criteria
 
 - [x] `BioObservation`モデル・`app/bio/observation_ingestion.py`が実装され、§6を満たす（26テスト、実データ14日分12,114件取り込み確認済み）
-- [ ] `SpeciesValueMaster`が独自コンパイルされ、§3の方針（10件の不一致の扱い）が反映されている
+- [x] `SpeciesValueMaster`が独自コンパイルされ、§3の方針（11件の不一致の扱い、実装中に1件追加発見）が反映されている（実データカバレッジ97.2%）
 - [ ] Baseline 0/Baseline 1のspecies prediction backtestが実装され、実データで実行される
 - [ ] value formula backtestが独立して実装・実行される
 - [ ] 60% gateの判定結果（PASS/FAIL/INSUFFICIENT_DATA）が正直に記録される

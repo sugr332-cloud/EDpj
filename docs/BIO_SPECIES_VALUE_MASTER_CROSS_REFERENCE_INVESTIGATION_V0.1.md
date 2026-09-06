@@ -70,6 +70,22 @@ EDMC-BioScanのvalueテーブルでカバー:     76 / 78（97.4%）
 
 実観測データとの突合カバレッジも97.4%と高く、**SpeciesValueMasterは実用的な精度でBio Value Modelに接続可能**と判断できる。
 
+### 3.1 数値の正しい読み方（レビュー指摘、2026-09-06）
+
+90.6%×90.6%は掛け合わせて解釈すべきではない。正しくは:
+
+- 名称一致: 106/117 = 90.6%
+- 名称一致した106種のうち値も完全一致: 96/106 = 90.6%
+- **全117種を母数にした場合、名称・価値とも完全一致したのは96/117 = 82.1%**
+
+残り約18%は「価値計算が間違っている」ことを意味しない——名称の語順差・variant/分類の違い・資料側の更新時期の差を切り分けた上で判断する必要がある。
+
+### 3.2 実装時に発見した11件目の不一致（2026-09-06追記）
+
+`app/bio/species_value_master.py`（`docs/PHASE_BIO_SPECIES_PREDICTION_BACKTEST_DESIGN_BASELINE_V0.1.md` §3）を実装する過程で、本書執筆時点では検出していなかった**11件目の不一致**を発見した: `Concha Biconcavis`が`16,777,215`（`Fonticulua Fluctus`と全く同じ`2^24-1`という不具合値）を持っていた。当時のFandom wiki抽出にこの種が含まれていなかったため、本書の10件の不一致リストには載っていなかった。
+
+独立した第3ソース（本書で見つけたコミュニティフォーラムの記述、「Concha Biconcavis / Tussock Stigmasis / Fonticulua Segmentatus は全て同じ額を支払う」）と、テーブル内で既に`Tussock Stigmasis`/`Fonticulua Segmentatus`が実際に`19,010,800`であることから、`Concha Biconcavis`も`19,010,800`に補正した——**この補正はいかなるbacktestも実行する前に行っており、結果を見てからの後付けではない**。
+
 ## 4. 次のステップ
 
 `docs/BIO_EXTERNAL_DATA_VALIDATION_SPEC_V0.1.md` §9の順序に従い、①（scanorganic/1可用性・天体パラメータ突合）②（本書、SpeciesValueMaster照合）が完了したことで、**③ species prediction / value formulaのbacktest実装に着手できる前提条件が揃った**。
