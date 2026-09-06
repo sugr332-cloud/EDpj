@@ -31,6 +31,20 @@ price per (station, commodity) is kept -- the LATEST by observed_at,
 matching how live Market data conventionally treats freshness (distinct
 from BioObservation's chronological-integrity reason for keeping the
 EARLIEST).
+
+Persistence (design doc §19/§22): a multi-day validation (7 days
+spread over 2 weeks) tested the hypothesis that a station flagged
+anomalous on MORE days is a higher-confidence corruption candidate.
+That hypothesis was REJECTED by real data -- the 10 stations flagged
+on every single sampled day traced back to genuine, explainable
+mechanics (real high-value rare-mineral buyback markets at what look
+like mining hotspots, and economically trivial swings on cheap
+commodities like hydrogenfuel/copper where the multiplicative ratio
+is oversensitive), not to anything resembling the Heck Silo/gold
+pattern. `compute_persistence()` below therefore exists PURELY as
+diagnostic metadata for later manual/offline analysis -- it is
+deliberately NOT consumed by `classify()` and must not be folded into
+the anomaly score without new evidence overturning §19's finding.
 """
 from __future__ import annotations
 
@@ -256,3 +270,62 @@ def classify(
     if commodity_anomalous:
         return "COMMODITY_ANOMALY"
     return "NORMAL"
+
+
+@dataclass(frozen=True)
+class PersistenceInfo:
+    """Diagnostic metadata only (§19/§22) -- NOT an anomaly-score input.
+    `persistence_ratio` of 1.0 means "flagged every day it was
+    observed"; per §19.4 this does NOT mean "more likely corrupted."""
+
+    station_id: int
+    anomaly_days: int
+    observed_days: int
+    persistence_ratio: float  # anomaly_days / observed_days
+
+
+def compute_persistence(
+    daily_anomaly_station_ids: list[set[int]],
+    daily_observed_station_ids: list[set[int]],
+) -> dict[int, PersistenceInfo]:
+    """`daily_anomaly_station_ids[i]` = the set of station_ids classified
+    COMMODITY_ANOMALY or STRONG_ANOMALY on day i (caller's own classify()
+    calls, one set per day). `daily_observed_station_ids[i]` = every
+    station_id that had a valid assessment that day at all (anomalous or
+    not) -- needed so a station's persistence_ratio is relative to how
+    often it was actually observed, not to the total number of days
+    sampled (a station only seen on 2 of 7 days should be judged against
+    those 2, not diluted by the 5 days it wasn't even present).
+
+    Returns one PersistenceInfo per station_id that was anomalous on at
+    least one day -- stations never flagged are simply absent, not
+    included with anomaly_days=0, since this is metadata for anomaly
+    candidates, not a full station census."""
+    if len(daily_anomaly_station_ids) != len(daily_observed_station_ids):
+        raise ValueError("daily_anomaly_station_ids and daily_observed_station_ids must have the same length")
+
+    anomaly_day_counts: dict[int, int] = defaultdict(int)
+    for day_anomalies in daily_anomaly_station_ids:
+        for station_id in day_anomalies:
+            anomaly_day_counts[station_id] += 1
+
+    observed_day_counts: dict[int, int] = defaultdict(int)
+    for day_observed in daily_observed_station_ids:
+        for station_id in day_observed:
+            observed_day_counts[station_id] += 1
+
+    result = {}
+    for station_id, anomaly_days in anomaly_day_counts.items():
+        observed_days = observed_day_counts.get(station_id, 0)
+        if observed_days == 0:
+            # a station flagged anomalous on a day it's absent from the
+            # matching "observed" set is a caller bug, not silently
+            # divided-by-zero here.
+            raise ValueError(f"station {station_id} has anomaly_days>0 but observed_days=0 -- inconsistent input")
+        result[station_id] = PersistenceInfo(
+            station_id=station_id,
+            anomaly_days=anomaly_days,
+            observed_days=observed_days,
+            persistence_ratio=anomaly_days / observed_days,
+        )
+    return result

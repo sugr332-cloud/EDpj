@@ -4,12 +4,14 @@ import datetime as dt
 
 from app.market.price_plausibility import (
     CommodityPriceStats,
+    PersistenceInfo,
     PriceAnomalyAssessment,
     SellObservation,
     assess_station,
     classify,
     compute_commodity_stats,
     compute_global_medians,
+    compute_persistence,
     compute_station_median_ratio,
     dedupe_latest,
 )
@@ -403,3 +405,63 @@ class TestClassifyAbsoluteFloorV3:
         kwargs = dict(station_ratio_threshold=1.3, commodity_percentile_threshold=0.99,
                       commodity_max_tie_share_threshold=0.05, commodity_value_ratio_threshold=1.3)
         assert classify(gold, **kwargs) == classify(gold, commodity_absolute_floor=None, **kwargs)
+
+
+class TestComputePersistence:
+    """§19/§22: persistence is diagnostic metadata ONLY -- these tests
+    verify the bookkeeping (anomaly_days/observed_days/ratio), not any
+    classification behavior, since compute_persistence() is never
+    called from classify() and must stay that way."""
+
+    def test_flagged_every_observed_day_gives_ratio_one(self):
+        daily_anomalies = [{1}, {1}, {1}]
+        daily_observed = [{1, 2}, {1, 2}, {1, 2}]
+
+        result = compute_persistence(daily_anomalies, daily_observed)
+
+        assert result[1] == PersistenceInfo(station_id=1, anomaly_days=3, observed_days=3, persistence_ratio=1.0)
+
+    def test_flagged_once_out_of_several_observed_days(self):
+        daily_anomalies = [{1}, set(), set()]
+        daily_observed = [{1, 2}, {1, 2}, {1, 2}]
+
+        result = compute_persistence(daily_anomalies, daily_observed)
+
+        assert result[1].anomaly_days == 1
+        assert result[1].observed_days == 3
+        assert result[1].persistence_ratio == 1 / 3
+
+    def test_ratio_is_relative_to_days_actually_observed_not_total_days(self):
+        # station 1 is only OBSERVED on 2 of 5 days, flagged both times
+        # -- persistence_ratio must be 1.0 (2/2), not 2/5.
+        daily_anomalies = [{1}, set(), {1}, set(), set()]
+        daily_observed = [{1}, {2}, {1}, {2}, {2}]
+
+        result = compute_persistence(daily_anomalies, daily_observed)
+
+        assert result[1].anomaly_days == 2
+        assert result[1].observed_days == 2
+        assert result[1].persistence_ratio == 1.0
+
+    def test_never_flagged_station_is_absent_from_result(self):
+        daily_anomalies = [set(), set()]
+        daily_observed = [{1, 2}, {1, 2}]
+
+        result = compute_persistence(daily_anomalies, daily_observed)
+
+        assert 2 not in result
+
+    def test_mismatched_list_lengths_raise(self):
+        import pytest
+        with pytest.raises(ValueError):
+            compute_persistence([{1}], [{1}, {2}])
+
+    def test_inconsistent_input_raises_rather_than_silently_dividing_by_zero(self):
+        # station flagged anomalous on a day it's missing from the
+        # "observed" set for that same day -- a caller bug, must not
+        # be silently swallowed as persistence_ratio=undefined.
+        import pytest
+        daily_anomalies = [{1}]
+        daily_observed = [set()]  # station 1 wasn't in the observed set that day
+        with pytest.raises(ValueError):
+            compute_persistence(daily_anomalies, daily_observed)
