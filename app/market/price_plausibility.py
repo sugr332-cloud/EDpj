@@ -112,6 +112,7 @@ class CommodityPriceStats:
 
     percentile: float  # rank within this commodity's own population (unchanged v1 definition)
     value_ratio: float  # station_price / commodity_global_median
+    value_difference_absolute: float  # station_price - commodity_global_median, in credits
     max_tie_count: int  # how many stations (for this commodity) share the population's max price
     max_tie_share: float  # max_tie_count / observation_count
     observation_count: int  # population size for this commodity
@@ -154,6 +155,7 @@ def compute_commodity_stats(
         stats[key] = CommodityPriceStats(
             percentile=below_or_equal / n,
             value_ratio=obs.sell_price / median,
+            value_difference_absolute=obs.sell_price - median,
             max_tie_count=max_tie_count[commodity_name],
             max_tie_share=max_tie_count[commodity_name] / n,
             observation_count=n,
@@ -204,11 +206,12 @@ def classify(
     commodity_percentile_threshold: float,
     commodity_max_tie_share_threshold: float,
     commodity_value_ratio_threshold: float,
+    commodity_absolute_floor: float | None = None,
 ) -> str:
-    """Two-axis classification (design doc §16-17, "T4-E"). Thresholds
+    """Two-axis classification (design doc §16-19, "T4-E"). Thresholds
     are caller-supplied, never hardcoded here -- production values
-    remain UNRESOLVED per §14/§16.5/§17.4 pending more calibration
-    examples.
+    remain UNRESOLVED per §14/§16.5/§17.4/§19.6/§20 pending more
+    calibration examples.
 
     Feature B (commodity-level) is now itself a conjunction, per
     §17.3/§17.4: a high percentile alone is NOT sufficient -- it must
@@ -218,7 +221,19 @@ def classify(
     correctly separates gold/Heck Silo (percentile=1.0, tie_share=0.02%,
     value_ratio=1.42 -- all three conditions met) from gallite's 143-way
     tie (percentile=1.0, tie_share=2.98%, likely a common ceiling) even
-    though both score percentile=1.0."""
+    though both score percentile=1.0.
+
+    `commodity_absolute_floor` (Feature B v3, §19.5/§20): OPTIONAL --
+    when given, ALSO requires value_difference_absolute >= this many
+    credits. Found necessary because value_ratio alone is purely
+    multiplicative and flags economically meaningless swings on cheap
+    commodities (hydrogenfuel: global median 80cr, a mere ~80-100cr
+    absolute difference already produces a 2x ratio). Left optional
+    (None = no floor applied) rather than a fixed number, since §20
+    found the "right" floor shape (flat credits vs. commodity-relative
+    vs. something else) is itself still an open, uncalibrated design
+    choice -- callers experimenting with candidate floors pass one in,
+    production code does not get a silently-baked-in default."""
     station_anomalous = (
         assessment.station_median_ratio is not None and assessment.station_median_ratio >= station_ratio_threshold
     )
@@ -231,6 +246,8 @@ def classify(
             and stats.max_tie_share <= commodity_max_tie_share_threshold
             and stats.value_ratio >= commodity_value_ratio_threshold
         )
+        if commodity_anomalous and commodity_absolute_floor is not None:
+            commodity_anomalous = stats.value_difference_absolute >= commodity_absolute_floor
 
     if station_anomalous and commodity_anomalous:
         return "STRONG_ANOMALY"

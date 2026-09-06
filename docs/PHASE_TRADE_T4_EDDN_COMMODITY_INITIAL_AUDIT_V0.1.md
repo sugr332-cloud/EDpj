@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.2
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2実装（§17-18）。7日間のMulti-day Stability Validation実施（§19）——Feature Aの分布は安定、ただし「持続性が高いほど破損の確度が高い」という仮説は実データで否定され、持続的異常はむしろ実在する局所経済状況（採掘拠点等）である可能性が高いと判明。value_ratioの絶対額下限が未実装という新課題も発見。production thresholdは引き続き未確定
+**Version:** 1.3
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2実装（§17-18）。Multi-day Stability Validation実施（§19、persistenceを異常度指標に使うべきでないと判明）。Feature B v3: 絶対額フィルタ実装・実データ検証済み（§20、5,000CR floorで無意味な低価格ノイズを59%除去しつつHeck Silo保持を確認）。production thresholdは引き続き未確定
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -799,3 +799,37 @@ Feature B v2: COMMODITY_ANOMALY比率は閾値Cで比較的安定（3.86〜4.94%
 ```
 
 **production thresholdは引き続き未確定。** 次段階は、(a) value_ratioの絶対額下限を追加する設計、(b) 一過性（1〜2日のみ検出）の異常候補を個別に裏取りする、のいずれかを検討する必要がある。
+
+## 20. Feature B v3: value_ratioへの絶対額認識の追加
+
+### 20.1 実装
+
+`CommodityPriceStats`に`value_difference_absolute`（station価格 − commodity母集団中央値、単位はCR）を追加。`classify()`に`commodity_absolute_floor`という**任意（デフォルト`None`＝チェックなし、後方互換）**パラメータを追加し、指定時は`value_difference_absolute >= floor`を追加のAND条件とする。**具体的な閾値はモジュール内に一切固定しない**——呼び出し側が実験的に値を渡す設計。7テスト追加（実データ形状を模したhydrogenfuel型/gold型の対比を含む）、計621テスト。
+
+### 20.2 実データでの検証（2026-09-05、station>=1.3/pct>=0.99/tie<=1%/ratio>=1.3を固定）
+
+```text
+floor未指定:     286件
+floor=1,000CR:   157件（45%減）
+floor=5,000CR:   116件（59%減）
+floor=10,000CR:  106件（63%減）
+floor=20,000CR:   50件（83%減）
+```
+
+**floor=5,000CRで除外された170件の内訳**（原因commodity別）:
+
+```text
+hydrogenfuel: 79件, basicmedicines: 45件, tea: 9件, water: 9件, superconductors: 8件,
+copper: 6件, grain: 5件, polymers: 4件, fruitandvegetables: 4件, coffee: 1件
+```
+
+**いずれも低価格・生活必需品系のcommodityであり、§19.5で指摘した「経済的に無意味な変動」パターンと完全に一致する。** 一方、**Heck Silo（gold、絶対差約20,130CR）はfloor=5,000CRでも一貫して検出され続けた**——既知の正例が絶対額フィルタ導入後も失われないことを確認できた。
+
+### 20.3 現時点の判断
+
+**production thresholdはまだ確定しない**（floor値自体を含め、固定CR・commodity相対・利益影響ベースのどれが最適かは未検証）。ただし、絶対額フィルタの導入自体が「経済的に無意味な低価格commodityのノイズ」を大きく除去しつつ既知の正例を保持することは実データで確認できた——**Feature B v3として設計は有効**と判断する。
+
+残る課題（次段階）:
+1. §19で指摘した「persistenceを異常度スコアに昇格させない」方針の実装——`anomaly_days`/`observed_days`のような診断情報としてのみ保持し、分類ロジックには組み込まない設計
+2. 一過性（1〜2日のみ検出）候補の個別裏取り——Heck Silo型（真の破損候補）を実際に発見できるか
+3. floor値自体（固定CR / commodity相対 / 利益影響ベース）の比較検討
