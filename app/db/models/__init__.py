@@ -1,5 +1,6 @@
 from app.db.models.calibration import CalibrationModel
-from app.db.models.eddn import BodyBioSignal, EddnJournalObservation
+from app.db.models.eddn import BioObservation, BioObservationFetchLog, BodyBioSignal, EddnJournalObservation
+from app.db.models.edsm import BodyPhysicalParameters
 from app.db.models.journal import JournalEvent
 from app.db.models.market import (
     MarketHistoricalFetchLog,
@@ -28,6 +29,9 @@ __all__ = [
     "Commodity",
     "EddnJournalObservation",
     "BodyBioSignal",
+    "BioObservation",
+    "BioObservationFetchLog",
+    "BodyPhysicalParameters",
     "CalibrationModel",
     "MarketHistoricalObservation",
     "MarketHistoricalFetchLog",

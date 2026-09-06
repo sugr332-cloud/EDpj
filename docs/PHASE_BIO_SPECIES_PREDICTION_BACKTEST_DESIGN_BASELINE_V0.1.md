@@ -1,7 +1,7 @@
 # EDpj Bio Species Prediction / Value Formula Backtest — Design Baseline
 
 **Version:** 0.1
-**Status:** §2実装済み（`BioObservation`/`app/bio/observation_ingestion.py`、新規26テスト全通過。実データ14日分を取り込み、12,114件のユニーク観測を確認——§2.4参照）。§3以降は未着手。
+**Status:** §2〜§4実装済み・実データでbacktest実行済み。**Baseline 1（k近傍）が60% gateをPASS（実測top-1 accuracy 73.9%/74.3%、2つの独立サンプルで再現確認）**——§4.6参照。§5（value formula backtest）は未着手。
 **Date:** 2026-09-06
 **Depends on:** `docs/BIO_EXTERNAL_DATA_VALIDATION_SPEC_V0.1.md`（binding）, `docs/BIO_SCANORGANIC_DATA_AVAILABILITY_INVESTIGATION_V0.1.md`, `docs/BIO_BODY_PARAMETER_JOIN_INVESTIGATION_V0.1.md`, `docs/BIO_SPECIES_VALUE_MASTER_CROSS_REFERENCE_INVESTIGATION_V0.1.md`
 
@@ -127,6 +127,43 @@ insufficient率   = 予測不能だったholdout body数の割合
 
 `docs/ABSOLUTE_FORMULA_VALIDATION_GATE_V0.1.md` §6と同じ規律——「60%達成のために最低サンプル数を不自然に下げない」。具体的な数値は実データの分布を見てから固定する（Mining Formula Validationの`MINIMUM_MINING_SELL_CASES=30`と同じ暫定値の扱い方を踏襲）。
 
+### 4.6 実データ実行結果（2026-09-06、`data/edpj.db`、chronological split: fit ≤ 2026-08-31, holdout > 2026-08-31）
+
+`collect_body_population`で母集団を再構成した結果、5,440天体（fit 4,180 / holdout 1,260）。**データ品質メモ**: 63天体（1.2%）が名目上の取り込み開始日（2026-08-22）より前のfirst_observed_atを持っていた——EDDNのgatewayTimestampとメッセージ自身のtimestampのズレ、または一部アップローダーのクロックスキューによるもので、chronological splitの妥当性を大きく損なう規模ではないため、正直に記録した上でそのまま進めた。
+
+**Baseline 0（母集団最頻値、ネットワーク不要、holdout全1,260天体で実行）**:
+
+```text
+top1_accuracy   = 29.2%（368/1260）  → FAIL（60%未達）
+topk_hit_rate   = 55.6%（701/1260、top-3）
+coverage        = 100%
+insufficient    = 0%
+```
+
+想定通りFAIL——body条件を一切使わない予測では60%に届かないことを実データで確認した（Mining/Tradeの「まず現行の単純な式を評価する」規律と同じ、失敗を前提にしたテストではなく正しい最初の測定）。
+
+**Baseline 1（k近傍、EDSM body parameters使用、fit/holdoutそれぞれ約300/150システムを実サンプリング）**:
+
+```text
+1回目（seed=11）: fit_sample=487体, holdout_sample=231体
+  top1_accuracy = 73.9%（170/230）  → PASS
+  topk_hit_rate = 90.0%（207/230、top-3）
+  coverage      = 99.6%
+  insufficient  = 0.4%（EDSM未カバーの1体のみ）
+
+2回目（seed=23、再現性確認のため独立した別サンプルで再実行）: fit_sample=499体, holdout_sample=208体
+  top1_accuracy = 74.3%（153/206）  → PASS
+  topk_hit_rate = 91.7%（189/206、top-3）
+  coverage      = 99.0%
+  insufficient  = 1.0%
+```
+
+**2つの独立したサンプルで73.9%/74.3%とほぼ同じ結果が再現された**——単発の偶然ではなく安定した結果と判断できる。distance計算は仕様通り「カテゴリカル項目（atmosphere_type/volcanism_type/sub_type）の完全一致を数値的な近さより優先する」設計（`CATEGORICAL_MISMATCH_PENALTY=10.0`、結果を見る前に固定済み）。
+
+**60% gate判定: `species prediction (Baseline 1) = PASS`**。Baseline 0からBaseline 1への改善幅（29.2%→73.9%）は、body条件（重力・表面温度・大気タイプ・火山活動・天体subType）がspecies予測に強く効くという、実データによる直接的な裏付けになった。
+
+**実装中に発見・修正した実バグ**: EDSMの実レスポンスに`"bodyId": null`を持つbody（未解決のstar等）が含まれるケースがあり、当初のコード（`"bodyId" not in body`というキー存在チェックのみ）がこれを見逃し、主キー列にNULLを挿入しようとして`NOT NULL constraint failed`で実行時エラーになった。`body.get("bodyId") is None`という値チェックに修正した——実データを実際に流して初めて発見できたバグ。また、新設した`BodyPhysicalParameters`/`BioObservation`関連モデルを`app/db/models/__init__.py`に登録し忘れており、`init_db()`単体では該当テーブルが作成されない潜在バグも発見・修正した（インポートチェーン経由でたまたま動いていたケースがあったため、テストでは検出されていなかった）。
+
 ## 5. Value Formula Backtest（仕様§6.2）
 
 Species predictionのbacktestとは独立に評価する（固定種価値の誤差とspecies predictionの誤差を混同しない、仕様§4.3）。
@@ -154,7 +191,7 @@ value formula backtestがspecies predictionのbacktestと独立したコード�
 
 - [x] `BioObservation`モデル・`app/bio/observation_ingestion.py`が実装され、§6を満たす（26テスト、実データ14日分12,114件取り込み確認済み）
 - [x] `SpeciesValueMaster`が独自コンパイルされ、§3の方針（11件の不一致の扱い、実装中に1件追加発見）が反映されている（実データカバレッジ97.2%）
-- [ ] Baseline 0/Baseline 1のspecies prediction backtestが実装され、実データで実行される
-- [ ] value formula backtestが独立して実装・実行される
-- [ ] 60% gateの判定結果（PASS/FAIL/INSUFFICIENT_DATA）が正直に記録される
-- [ ] 既存テストスイートに回帰がない
+- [x] Baseline 0/Baseline 1のspecies prediction backtestが実装され、実データで実行される（§4.6、32テスト）
+- [ ] value formula backtestが独立して実装・実行される（未着手、次のステップ）
+- [x] 60% gateの判定結果（PASS/FAIL/INSUFFICIENT_DATA）が正直に記録される——**species predictionはBaseline 1でPASS（top-1 73.9%/74.3%、2サンプルで再現）、Baseline 0はFAIL（29.2%）**
+- [x] 既存テストスイートに回帰がない（529 → 557テスト全通過）
