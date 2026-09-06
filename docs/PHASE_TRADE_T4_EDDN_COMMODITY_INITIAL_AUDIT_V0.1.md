@@ -1,7 +1,7 @@
-# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C/T4-D第1回）
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump Integration）
 
-**Version:** 0.7
-**Status:** T4-A/B/C/D 完了（§14）。`station_median_ratio`を正式特徴量として採用、本番閾値はDistance/Jump統合後に実データ蓄積してから確定する方針。次段階: Distance/Jump Integration
+**Version:** 0.8
+**Status:** T4-A/B/C/D 完了（§14）。Distance/Jump Integration実装・実データ検証済み（§15、価格妥当性チェックの結論を独立に裏付け）。残課題: production threshold確定、duplicate除去バグ修正、本番DB永続化
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -525,3 +525,47 @@ production threshold（P99等の本番閾値固定）             → UNRESOLVED
 ```text
 次段階: Distance / Jump Integration
 ```
+
+## 15. Distance / Jump Integration（実装済み）
+
+### 15.1 実装
+
+`app/collectors/spansh_route.py`（`plot_route`）: Bio期のjump-count feasibility investigation（`docs/BIO_JUMP_COUNT_FEASIBILITY_INVESTIGATION_V0.1.md`）で検証済みだったSpansh Galaxy Route Plotter（`POST /api/route` → `GET /api/results/{job}`のpolling）を、初めて再利用可能なモジュールとして実装した。実装前に契約を再度実データで確認（`efficiency=60`はコミュニティ製`EDMC_SpanshRouter`プラグインのデフォルト値を踏襲、独自の値ではない）。
+
+`app/market/trade_candidate.py`（`TradeCandidate`データクラス、`attach_route`）: T4-Dのprofit計算結果に、`distance_ly`・`jump_count`・`profit_per_ly`・`profit_per_jump`を付与する。ルート計算に失敗した場合は`None`のまま返す（distance/jumpを捏造しない）。7テスト + 4テスト、計11テスト追加。
+
+なお、同日GitHubにpushされた`DESTINATION_ETA_SPEC_V0.1.md`/`PHASE_DESTINATION_ETA_V0.1.md`は、**本機能とは別のフィーチャー**（FSDジャンプ後のsystem内Supercruise距離・ETA、Phase 0-C Action Horizon側、Scoringには使わない）であることを確認済み——混同しないよう明記する。
+
+### 15.2 実データでの検証: Distance軸が価格妥当性チェックの結論を独立に裏付けた
+
+T4-D §12-13で得た3つの実候補（origin: Turing's Folly固定、ship_range=25ly）にdistanceを付与した結果:
+
+```text
+tritium destination=Tir/J8V-06B（§12.3で破損stationと判定済み）:
+  unit_profit=100,613  distance_ly=21,844.08  jump_count=241
+  profit_per_ly=4.61   profit_per_jump=417.48
+
+tritium destination=Many Made This Light（§12.4で「妥当」と判定済み）:
+  unit_profit=7,831    distance_ly=101.48   jump_count=1
+  profit_per_ly=77.17  profit_per_jump=7,831.0
+
+gold destination=Cheranovsky City（§12.4で「妥当」と判定済み）:
+  unit_profit=9,248    distance_ly=178.30   jump_count=1
+  profit_per_ly=51.87  profit_per_jump=9,248.0
+```
+
+**破損stationと判定した`Tir`は241ジャンプ・21,844光年という現実離れした遠方だった一方、価格妥当性チェックで「正常」とした2候補はいずれも1ジャンプで到達可能だった。** 価格妥当性（station_median_ratio、§13）という軸と、距離（今回のjump_count）という全く独立した軸が、同じ結論を指し示している——これは§13の価格妥当性特徴量への追加の裏付けであると同時に、**`profit_per_jump`でランキングするだけでも、破損データによる極端な値をある程度自然に希薄化できる**（417 vs 7,831/9,248という大差）ことを示している。ただし、これは価格妥当性チェックの代替にはならない——`profit_per_jump`ですら417という値自体は依然として「高利益」の範疇に見えてしまう可能性があり、station_median_ratioによる明示的な除外は引き続き必要。
+
+### 15.3 現状
+
+```text
+Distance計算（Spansh route API）    → 実装・実データ検証済み
+Jump count計算                     → 実装・実データ検証済み
+profit_per_ly / profit_per_jump    → 実装済み
+TradeCandidateへの統合              → 実装済み（distance/jump欠損時はNone、捏造なし）
+production threshold（station_median_ratio） → 未確定（§14の方針通り、今後の実データ蓄積後に確定）
+Duplicate除去バグ（§13.2）          → 未修正（別タスクとして記録済み）
+本番DB永続化                       → 未実施（investigation/moduleレベルの実装のみ）
+```
+
+Distance/Jump統合は実装・実データ検証まで完了。次は、この統合パイプラインを使った実データ蓄積を経てのThreshold Calibration、または総合Trade Rankingへの接続が課題として残る。
