@@ -97,7 +97,37 @@ class TestEnsureDaysFetchedBatch:
         row = db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").one()
         assert row.received_at is None
         assert row.buy_price == 0
-        assert row.supply == 0
+
+    def test_refetching_an_already_covered_date_enriches_the_existing_row(self, db_session):
+        # A deliberate re-fetch (after clearing MarketHistoricalFetchLog
+        # for this target/date) must UPDATE the existing observation with
+        # newly-tracked columns, not silently keep the older, narrower row
+        # forever -- this is exactly the mechanism the real buy_price/
+        # supply backfill (Phase 2-6F-T1 §10) depends on.
+        date = NOW.date()
+        bare_envelope = _envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5}])
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day([bare_envelope])})
+        ensure_days_fetched_batch(db_session, [(100, "platinum")], [date], client)
+
+        row = db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").one()
+        assert row.buy_price == 0  # a real EDDN message omitting buyPrice defaults to 0, not unknown
+
+        db_session.query(MarketHistoricalFetchLog).filter_by(station_id=100, commodity_name="platinum", date=date).delete()
+        db_session.commit()
+
+        enriched_envelope = _envelope(
+            100, f"{date:%Y-%m-%d}T10:00:00Z",
+            [{"name": "platinum", "sellPrice": 40000, "demand": 5, "buyPrice": 39000, "stock": 12}],
+        )
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day([enriched_envelope])})
+        ensure_days_fetched_batch(db_session, [(100, "platinum")], [date], client)
+
+        db_session.expire_all()
+        row = db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").one()
+        assert row.buy_price == 39000
+        assert row.supply == 12
+        # still exactly one row -- the update replaced it in place, no duplicate
+        assert db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").count() == 1
 
     def test_second_call_does_not_refetch_already_covered_dates(self, db_session):
         date = NOW.date()

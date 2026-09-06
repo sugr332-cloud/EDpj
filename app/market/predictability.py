@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.collectors.eddn import MalformedEddnMessage, parse_commodity_message
 from app.collectors.eddn_archive import StreamingHttpClient, iter_commodity_day
 from app.db.models.market import MarketHistoricalFetchLog, MarketHistoricalObservation, MarketPredictability
-from app.db.upsert import upsert_ignore, upsert_preserve_columns
+from app.db.upsert import upsert_preserve_columns
 from app.journal.parser import parse_journal_timestamp
 from app.market.volatility import Observation, demand_change_ratio, median_and_p95, pair_observations, price_change_ratio
 
@@ -160,8 +160,14 @@ def ensure_days_fetched_batch(
                 }
                 for row in matches_by_target[target]
             ]
-            upsert_ignore(
-                session, MarketHistoricalObservation, observation_rows, ["station_id", "commodity_name", "observed_at"]
+            # upsert_preserve_columns (not upsert_ignore): a re-fetch of an
+            # already-covered date must be able to enrich an existing row
+            # (e.g. backfilling buy_price/supply/received_at once those
+            # columns started being tracked, Phase 2-6F-T1 §10) rather than
+            # silently keeping the older, narrower row forever.
+            upsert_preserve_columns(
+                session, MarketHistoricalObservation, observation_rows,
+                ["station_id", "commodity_name", "observed_at"], preserve_columns=set(),
             )
             session.add(
                 MarketHistoricalFetchLog(
