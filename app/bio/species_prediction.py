@@ -128,15 +128,16 @@ def _distance(
     return numeric + CATEGORICAL_MISMATCH_PENALTY * mismatches
 
 
-def predict_knn(
+def _nearest_neighbor_species_counts(
     target: BodyFeatures,
     fit_examples: list[tuple[BodyFeatures, frozenset[str]]],
-    k: int = NEIGHBOR_COUNT,
-) -> list[str] | None:
-    """Ranks species by frequency among the k nearest fit-population
-    neighbors (by _distance). None only when there are no fit examples
-    at all to compare against (structurally can't predict, not "no
-    species found")."""
+    k: int,
+) -> Counter[str] | None:
+    """Shared core of predict_knn()/predict_knn_distribution(): counts
+    how many times each species appears among the k nearest fit-population
+    neighbors (by _distance). None only when there are no fit examples at
+    all to compare against (structurally can't predict, not "no species
+    found")."""
     if not fit_examples:
         return None
     gravity_range, temperature_range = _feature_ranges([f for f, _ in fit_examples])
@@ -145,7 +146,76 @@ def predict_knn(
     counter: Counter[str] = Counter()
     for _, species_set in neighbors:
         counter.update(species_set)
+    return counter
+
+
+def predict_knn(
+    target: BodyFeatures,
+    fit_examples: list[tuple[BodyFeatures, frozenset[str]]],
+    k: int = NEIGHBOR_COUNT,
+) -> list[str] | None:
+    """Ranks species by frequency among the k nearest neighbors. None
+    only when there are no fit examples at all to compare against."""
+    counter = _nearest_neighbor_species_counts(target, fit_examples, k)
+    if counter is None:
+        return None
     return [species for species, _ in sorted(counter.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def predict_knn_distribution(
+    target: BodyFeatures,
+    fit_examples: list[tuple[BodyFeatures, frozenset[str]]],
+    k: int = NEIGHBOR_COUNT,
+) -> dict[str, float] | None:
+    """p(s) for the value formula backtest (design doc §5): each
+    species' share of the total (species-mention) count among the k
+    nearest neighbors -- a neighbor body with multiple species
+    contributes to each of them, so this does not double as "fraction
+    of neighbor bodies", only as a relative-frequency estimate of p(s).
+    None only when there are no fit examples to compare against; an
+    empty neighbor species set (structurally impossible in practice,
+    since every BioObservation body has >=1 species) would also return
+    None rather than a fabricated uniform distribution."""
+    counter = _nearest_neighbor_species_counts(target, fit_examples, k)
+    if counter is None:
+        return None
+    total = sum(counter.values())
+    if total == 0:
+        return None
+    return {species: count / total for species, count in counter.items()}
+
+
+def predict_species_membership_probabilities(
+    target: BodyFeatures,
+    fit_examples: list[tuple[BodyFeatures, frozenset[str]]],
+    k: int = NEIGHBOR_COUNT,
+) -> dict[str, float] | None:
+    """p(s) = fraction of the k nearest fit-population neighbor BODIES
+    that contain species s -- a marginal "is species s present on this
+    body" probability, estimated independently per species. Deliberately
+    does NOT sum to 1: several species can each be near-certain at once
+    (e.g. every one of the k neighbors shares the same 2-species
+    co-occurrence -> both get p=1.0), unlike predict_knn_distribution's
+    single normalized categorical share.
+
+    This is the semantics the value formula backtest needs
+    (app.bio.value_formula_backtest): compute_actual_value sums the
+    master value of EVERY species genuinely observed on a body, so the
+    predicted side must be able to represent "multiple species are each
+    likely present" rather than "if you could only report one species,
+    which is it" -- real-data audit (2026-09-06) showed
+    predict_knn_distribution's Sigma p(s)=1 constraint systematically
+    under-predicted multi-species bodies (17.3% hit-rate vs 47.4% for
+    single-species bodies, 327/401 under-predictions overall).
+
+    None only when there are no fit examples to compare against."""
+    counter = _nearest_neighbor_species_counts(target, fit_examples, k)
+    if counter is None:
+        return None
+    neighbor_count = min(k, len(fit_examples))
+    if neighbor_count == 0:
+        return None
+    return {species: count / neighbor_count for species, count in counter.items()}
 
 
 @dataclass(frozen=True)

@@ -172,7 +172,51 @@ Species predictionのbacktestとは独立に評価する（固定種価値の誤
 expected_value_base = Σ p(s) × base_value(s)
 ```
 
-`p(s)`は§4のprediction backtestが出力する確率分布（k近傍のspecies頻度）、`base_value(s)`は§3のSpeciesValueMaster。実際の観測species（ground truth）の`base_value`と、予測期待値を比較し、Mining/Tradeと同じ`relative_error <= 0.40`のhit-rateで`formula_accuracy`を計算する。
+`base_value(s)`は§3のSpeciesValueMaster。実際の観測species（ground truth、`compute_actual_value` = そのbodyに実在した**全species分の合計**）の`base_value`と、予測期待値を比較し、Mining/Tradeと同じ`relative_error <= 0.40`のhit-rateで`formula_accuracy`を計算する。
+
+### 5.1 `p(s)`の意味論（実データ検証により確定・仕様補強）
+
+`p(s)`は**「対象bodyにspecies sが存在するmarginal確率」**であり、`Σp(s) = 1`を要求しない。1つのbodyが複数のspeciesを同時に持ちうる以上、`p(s)`は各species独立の存在確率でなければならず、「複数候補から1つだけ選ぶ」ための正規化カテゴリ分布ではない（`predict_species_membership_probabilities`、§5.3参照）。
+
+### 5.2 第1回実行結果: FAIL（正規化カテゴリ分布を使用）
+
+```text
+formula_accuracy = 30.4%（0.30423940149625933）
+valid_cases      = 401
+verdict          = FAIL（minimum_cases=30を大幅に超過、INSUFFICIENT_DATAではない）
+```
+
+実装当初は`predict_knn_distribution`（k近傍のspecies言及数を**全言及数の合計**で正規化し`Σp(s)=1`を強制する関数）をそのまま流用していた。実データ監査（2026-09-06）により、この設計は「bodyに存在する複数speciesの合計価値」ではなく「1種類だけ選ぶとした場合の期待価値」を計算していたことが判明:
+
+```text
+単一species body（n=175）: hit-rate 47.4%
+複数species body（n=226）: hit-rate 17.3%
+過大予測 74件 / 過小予測 327件（複数species bodyで系統的な過小評価）
+```
+
+象徴的な例: 実際に2種（Bacterial_05, Fonticulus_02、計2,000,000）を持つbodyで、k近傍5件全てが同一の2種を保持していたにもかかわらず、`Σp(s)=1`の制約により`p(各種)=0.5`に薄められ、`expected_value=1,000,000`（実測の半分）となっていた。
+
+### 5.3 修正: marginal存在確率への変更、再実行結果: 依然FAIL（改善）
+
+`p(s) = (species sを含む近傍body数) / (近傍body総数)`（`predict_species_membership_probabilities`、`app/bio/species_prediction.py`）に変更。`Σp(s)`は1を超えてもよい（複数speciesが同時にほぼ確実というケースを正しく表現するため）。
+
+```text
+formula_accuracy = 58.4%（0.5835411471321695）
+valid_cases      = 401（同一holdout集合）
+verdict          = FAIL（60%未満、ただし30.4%から大幅改善）
+```
+
+種数別の内訳（方向が反転）:
+
+```text
+単一species（n=175）: hit-rate 52.6%（92/175）
+複数species（n=226）: hit-rate 62.8%（134/226）
+過大予測 182件 / 過小予測 219件（前回の過小偏重が大きく緩和）
+```
+
+最も外れが大きいケースは全て**単一species body**で、予測値が実測の10〜18倍という極端な過大評価だった（例: 予測19,210,800 vs 実測1,000,000）。これらは環境条件が「複数の高価値speciesが同時に存在する近傍」と一致するため、marginal確率が複数speciesにそれぞれ高い値を割り当てるが、当該bodyでは1種類（低価値のBacterium系）しか観測されていない、というケース。
+
+**未確定の仮説（次の調査対象）**: 外部母集団（EDDN `scanorganic/1`）は、あるbodyについて実際に発見されうる全speciesを必ずしも網羅していない可能性がある——1人のCMDRが全genusを走査するとは限らず、archive収集期間内に一部のspeciesしか報告されていないbodyでは、「観測species = 実在species」という前提（ground truth側の仮定）自体が過小申告になっている可能性がある。これはvalue formula側の欠陥ではなく、ground truthの完全性（observation completeness）の問題であり、次の診断対象とする。
 
 ## 6. Acceptance Tests
 
@@ -192,6 +236,6 @@ value formula backtestがspecies predictionのbacktestと独立したコード�
 - [x] `BioObservation`モデル・`app/bio/observation_ingestion.py`が実装され、§6を満たす（26テスト、実データ14日分12,114件取り込み確認済み）
 - [x] `SpeciesValueMaster`が独自コンパイルされ、§3の方針（11件の不一致の扱い、実装中に1件追加発見）が反映されている（実データカバレッジ97.2%）
 - [x] Baseline 0/Baseline 1のspecies prediction backtestが実装され、実データで実行される（§4.6、32テスト）
-- [ ] value formula backtestが独立して実装・実行される（未着手、次のステップ）
-- [x] 60% gateの判定結果（PASS/FAIL/INSUFFICIENT_DATA）が正直に記録される——**species predictionはBaseline 1でPASS（top-1 73.9%/74.3%、2サンプルで再現）、Baseline 0はFAIL（29.2%）**
-- [x] 既存テストスイートに回帰がない（529 → 557テスト全通過）
+- [x] value formula backtestが独立して実装・実行される（§5、575テスト）——**現時点でFAIL（58.4%、401件、正規化カテゴリ分布からmarginal存在確率へ修正して30.4%から改善したが60%未達）。原因分類済み（§5.3）、次はground truth完全性の調査**
+- [x] 60% gateの判定結果（PASS/FAIL/INSUFFICIENT_DATA）が正直に記録される——**species predictionはBaseline 1でPASS（top-1 73.9%/74.3%、2サンプルで再現）、Baseline 0はFAIL（29.2%）、value formulaはFAIL（58.4%、暫定採用しない）**
+- [x] 既存テストスイートに回帰がない（529 → 557 → 575テスト全通過）

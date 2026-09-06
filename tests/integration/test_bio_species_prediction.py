@@ -9,6 +9,8 @@ from app.bio.species_prediction import (
     collect_body_population,
     evaluate_predictions,
     predict_knn,
+    predict_knn_distribution,
+    predict_species_membership_probabilities,
     rank_species_by_frequency,
     run_baseline0,
     run_baseline1,
@@ -113,6 +115,64 @@ class TestPredictKnn:
         ]
         result = predict_knn(target, examples, k=3)
         assert result[0] == "A"
+
+
+class TestPredictKnnDistribution:
+    def test_no_fit_examples_returns_none(self):
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        assert predict_knn_distribution(target, []) is None
+
+    def test_distribution_sums_to_one(self):
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        examples = [
+            (BodyFeatures(1.0, 200, "Thin", "None", "Rocky body"), frozenset({"A"})),
+            (BodyFeatures(1.01, 201, "Thin", "None", "Rocky body"), frozenset({"A"})),
+            (BodyFeatures(1.02, 202, "Thin", "None", "Rocky body"), frozenset({"B"})),
+        ]
+        dist = predict_knn_distribution(target, examples, k=3)
+        assert abs(sum(dist.values()) - 1.0) < 1e-9
+        assert dist["A"] == 2 / 3
+        assert dist["B"] == 1 / 3
+
+    def test_multi_species_neighbor_contributes_to_each_of_its_species(self):
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        examples = [(BodyFeatures(1.0, 200, "Thin", "None", "Rocky body"), frozenset({"A", "B"}))]
+        dist = predict_knn_distribution(target, examples, k=1)
+        assert dist == {"A": 0.5, "B": 0.5}
+
+
+class TestPredictSpeciesMembershipProbabilities:
+    def test_no_fit_examples_returns_none(self):
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        assert predict_species_membership_probabilities(target, []) is None
+
+    def test_probabilities_need_not_sum_to_one(self):
+        # every neighbor shares the same 2 species -> both are near-certain
+        # simultaneously, unlike predict_knn_distribution's normalized share.
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        examples = [
+            (BodyFeatures(1.0, 200, "Thin", "None", "Rocky body"), frozenset({"A", "B"})),
+            (BodyFeatures(1.01, 201, "Thin", "None", "Rocky body"), frozenset({"A", "B"})),
+        ]
+        dist = predict_species_membership_probabilities(target, examples, k=2)
+        assert dist == {"A": 1.0, "B": 1.0}
+        assert sum(dist.values()) == 2.0
+
+    def test_partial_co_occurrence_gives_fractional_membership(self):
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        examples = [
+            (BodyFeatures(1.0, 200, "Thin", "None", "Rocky body"), frozenset({"A"})),
+            (BodyFeatures(1.01, 201, "Thin", "None", "Rocky body"), frozenset({"A", "B"})),
+        ]
+        dist = predict_species_membership_probabilities(target, examples, k=2)
+        assert dist == {"A": 1.0, "B": 0.5}
+
+    def test_denominator_is_actual_neighbor_count_not_requested_k(self):
+        # only 1 fit example available even though k=5 is requested.
+        target = BodyFeatures(gravity=1.0, surface_temperature=200, atmosphere_type="Thin", volcanism_type="None", sub_type="Rocky body")
+        examples = [(BodyFeatures(1.0, 200, "Thin", "None", "Rocky body"), frozenset({"A"}))]
+        dist = predict_species_membership_probabilities(target, examples, k=5)
+        assert dist == {"A": 1.0}
 
 
 class TestEvaluatePredictions:
