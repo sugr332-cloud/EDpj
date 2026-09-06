@@ -1,7 +1,7 @@
-# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C）
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C/T4-D第1回）
 
-**Version:** 0.3
-**Status:** T4-A/T4-B/T4-C 完了。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（T4-D未実施、Accuracy checkも未実施）
+**Version:** 0.4
+**Status:** T4-A/B/C 完了。T4-D第1回実証完了（重大な設計欠陥を発見・部分修正）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（Accuracy check・Distance/Jump統合が未完了）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -10,7 +10,7 @@
 T4-A  Initial Unfiltered EDDN Commodity/3 Audit（単一日、§1-§6）        → 完了
 T4-B  EDDN Commodity Daily Distribution Audit（14日以上、§9）          → 完了
 T4-C  Commodity Master / Provenance Audit（§10）                       → 完了
-T4-D  Trade Candidate Construction                                     → 未着手
+T4-D  Trade Candidate Construction（§11）                              → 第1回実証完了、Accuracy未検証
 ```
 
 ## 1. 目的と位置づけ
@@ -293,3 +293,81 @@ C-4 Trade候補利用条件        → 仕様化完了（demand=0の意味論は
         ↓
 次: T4-D（Trade Candidate Construction）へ
 ```
+
+## 11. T4-D: Trade Candidate Construction — 第1回実証（1 Origin Station）
+
+### 11.1 フィールド対応関係の訂正（実装前に確定）
+
+実装前に、EDDN公式スキーマ（`commodity-v3.0.json`）で正確なフィールド対応を確認した:
+
+```text
+buyPrice（"Price to buy from the market"） + stock  → 購入可能条件（Origin/source）
+sellPrice（"Price to sell to the market"） + demand → 売却可能条件（Destination）
+```
+
+（自プロジェクトのフィールド名では`row["buy_price"]`+`row["supply"]`がOrigin、`row["sell_price"]`+`row["demand"]`がDestinationに対応。T4-C §10.5の定義と一致。）
+
+### 11.2 第1回実装（investigation only、DB永続化なし）: 重大な問題を発見
+
+2026-09-05のアーカイブから、KNOWN commodityを15種以上`buy_price>0 AND supply>0`で持つ最初のstation（`Turing's Folly`, `Col 285 Sector RX-Q a48-3`, 63種）をOriginとし、同commodityについて`sell_price>0 AND demand>0`の全destination候補から**単純に最大profitのdestinationを選ぶ**方式で実装した結果:
+
+```text
+fruitandvegetables: origin_buy=172 → dest_sell=40,483（unit_profit=40,311）
+tritium:            origin_buy=50,009 → dest_sell=1,538,461（unit_profit=1,488,452）
+```
+
+**Fruit and Vegetables（実際の相場は150〜300CR程度）が40,483CRで売れるというのは明らかに非現実的。** 上位候補destinationを個別に調査した結果:
+
+```text
+WBV-04T（destination候補の1つ）: 21品目全てbuy_price=0・supply=0、
+    かつemergencypowercells/evacuationshelter/buildingfabricators等の
+    「建設資材」だけ高値でdemandを示す
+Metz Enterprise: 368品目中4品目のみbuy_price>0 AND supply>0
+WFY-G1Y:         1品目中0品目
+PS00:            31品目中0品目
+```
+
+**原因判明: これらは通常のCommodities Marketではなく、「植民地建設船（Colonisation Ship）」型の一方向market**（T4-A §4.1で発見した`station='$EXT_PANEL_ColonisationShip; Cobb Horizons'`という未解決ローカライズキーと同じゲーム内メカニクス）。プレイヤーへの通常販売は一切行わず、建設資材の納品に対して人為的に高い買取価格を提示する——これをそのまま「利益」として扱うと、`max(profit)`という単純な選択方法が系統的にこの種の特殊marketへ吸い寄せられてしまう。**データ破損ではなく、市場種別の混同という設計上の欠陥だった。**
+
+### 11.3 修正: destinationを「通常の双方向market」に限定
+
+「自身の commodity listing のうち`buy_price>0 AND supply>0`が10品目以上あるstationのみをdestination候補として許可する」条件を追加して再実行:
+
+```text
+tritium: origin_buy=50,009 → dest_sell=150,622（unit_profit=100,613）
+gold:    origin_buy=45,531 → dest_sell=67,793（unit_profit=22,262、+48.9%）
+steel:   origin_buy=3,887  → dest_sell=24,023（unit_profit=20,136）
+```
+
+Fruit and Vegetables等の極端な事例は解消された。ただし**tritiumの3倍近い価格差、goldの+49%は依然として実在の裏取りができていない**——これはT4のAccuracy checkとして最初から未実施のまま残していた項目そのものであり、ここで初めて具体的に必要性が実証された形になる。**「PASS」とはまだ言えない。**
+
+### 11.4 T4-D Exit Criteriaへの追加項目
+
+ユーザー提示のExit Criteria表に対し、実証を通じて以下を追加する:
+
+```text
+Destination market type   通常の双方向market限定（自身の commodity listing の一定割合以上が
+                           buy_price>0 AND supply>0であること）。植民地建設船等の
+                           一方向depot型marketをdestinationから除外する
+Accuracy（未解決）        単一日・単一origin内では検出しきれない極端な価格差
+                           （tritium 3倍、gold +49%等）を、複数日・独立ソースとの
+                           突合、または該当commodityの母集団価格分布との比較で
+                           さらに検証する必要がある
+```
+
+### 11.5 T4-D現状
+
+```text
+Commodity eligibility  → KNOWN限定、実装済み
+Origin condition       → buy_price>0 AND supply>0、実装済み・検証済み
+Destination condition  → sell_price>0 AND demand>0 AND 通常双方向market限定、実装済み
+Profit計算             → 実装済み、非現実的な値は解消したが完全なAccuracy検証は未完了
+Same station除外        → 実装済み
+Distance / Jump         → 未実装（次段階）
+Provenance保持          → データとしては取得済み、候補構造への統合は未実装
+Freshness               → 未実装
+Duplicate               → T4-C §10.4の設計のみ、未実装
+Replay再現性            → 未検証
+```
+
+**結論**: T4-DはOrigin/Destination/Profit計算の基本構造が実データで動作することを実証したが、**まだ本番のTrade Candidate構築として採用できる完成度ではない**。特にAccuracy検証（tritium/gold級の価格差の裏取り）と、Distance/Jump統合が残っている。次にどちらを優先するかは要判断。
