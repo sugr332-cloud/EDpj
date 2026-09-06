@@ -427,3 +427,73 @@ def compute_station_anomaly_profile(
         anomalous_commodity_count=len(anomalous),
         anomaly_value_concentration=concentration,
     )
+
+
+@dataclass(frozen=True)
+class CrossStationPatternInfo:
+    """Feature B v5 (design doc §24, "Cross-Station Commodity Pattern")
+    -- diagnostic only, not wired into classify(). §23's real-data
+    check found 31 stations independently sharing the EXACT SAME
+    anomalous-commodity combination ({cobalt, osmium, painite,
+    platinum}) at near-identical value_ratio -- independent per-station
+    data corruption would not be expected to reproduce a 4-commodity
+    combination this precisely across unrelated stations/systems. A
+    large `pattern_station_count` with tightly-clustered ratios
+    (`pattern_price_similarity` close to 0) is evidence the pattern
+    reflects a real, shared galaxy-wide/regional economic condition --
+    evidence AGAINST corruption, not for it. A pattern seen at only one
+    station (pattern_station_count=1, similarity=None) cannot be
+    corroborated this way, which is a different, weaker kind of
+    evidence -- it does NOT by itself prove corruption either, only
+    that no cross-station confirmation exists yet."""
+
+    station_id: int
+    commodity_pattern: frozenset[str]
+    pattern_station_count: int  # distinct stations (including this one) sharing the exact same commodity_pattern
+    pattern_price_similarity: float | None  # mean coefficient of variation of value_ratio per commodity across those stations; None if pattern_station_count==1 (nothing to compare against)
+
+
+def compute_cross_station_patterns(
+    profiles: dict[int, StationAnomalyProfile],
+) -> dict[int, CrossStationPatternInfo]:
+    """Groups stations (from an already-computed set of
+    StationAnomalyProfile, e.g. one per station in a day's population)
+    by the exact SET of commodities each finds anomalous, then measures
+    how many independent stations share that combination and how
+    tightly their per-commodity value_ratio clusters within it. Only
+    stations with at least one anomalous commodity are included in the
+    result (a station with zero has no pattern to compare)."""
+    by_pattern: dict[frozenset[str], list[int]] = defaultdict(list)
+    for station_id, profile in profiles.items():
+        if profile.anomalous_commodity_count == 0:
+            continue
+        pattern = frozenset(d.commodity_name for d in profile.anomalous_commodities)
+        by_pattern[pattern].append(station_id)
+
+    result: dict[int, CrossStationPatternInfo] = {}
+    for pattern, station_ids in by_pattern.items():
+        similarity = None
+        if len(station_ids) >= 2:
+            coefficients_of_variation = []
+            for commodity in pattern:
+                ratios = [
+                    detail.stats.value_ratio
+                    for sid in station_ids
+                    for detail in profiles[sid].anomalous_commodities
+                    if detail.commodity_name == commodity
+                ]
+                if len(ratios) >= 2:
+                    mean_ratio = statistics.mean(ratios)
+                    if mean_ratio > 0:
+                        coefficients_of_variation.append(statistics.stdev(ratios) / mean_ratio)
+            if coefficients_of_variation:
+                similarity = statistics.mean(coefficients_of_variation)
+
+        for station_id in station_ids:
+            result[station_id] = CrossStationPatternInfo(
+                station_id=station_id,
+                commodity_pattern=pattern,
+                pattern_station_count=len(station_ids),
+                pattern_price_similarity=similarity,
+            )
+    return result

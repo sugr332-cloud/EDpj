@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.5
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2/v3/v4実装（§17-23）。Persistence診断化・floor絞り込み（10-20kCR）・一過性候補裏取り・commodity群相関構造の実装まで完了。**Heck Silo型の明確な単一commodity破損はまだ1件も確定できていない**（Heck Silo自体も当初想定より曖昧と判明）——正直に記録。production thresholdは引き続き未確定
+**Version:** 1.6
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2-v5実装（§17-24）。Cross-Station Pattern Analysisにより、異常station 80件中76件（95%）が複数stationで再現される既知の市場パターンと判明——真に孤立した候補はW8Y-WVM（steel）とHeck Silo（gold+palladium）の2件のみに絞り込めた（§24）。production thresholdは引き続き未確定
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -925,4 +925,57 @@ Glashow Relay/Wredguia UH-U c16-9, Hq Of Vogz/14 Ceti
 
 `anomalous_commodity_count`/`anomaly_value_concentration`は、Heck Silo（count=2, concentration=0.537）と採掘拠点型（count=4, concentration=0.38）の間で**期待した方向の差**（数が少なく集中度が高いほどHeck Silo寄り）を示したが、**分離は当初の合成データ検証ほど劇的ではなかった**——Heck Silo自体が完全な「count=1の孤立例」ではなかったため。また、複数stationにわたる同一パターンの再現という、当初想定していなかった新たな判別材料（**独立した複数stationが同一の異常パターンを示す場合は、破損ではなく共有された実市場条件である可能性が高い**）が実データから得られた——これも診断情報として今後活用できる。
 
-**production thresholdは引き続き未確定。** 本フェーズを通じて、「明確な単一commodity型のデータ破損」の実例はまだ1件も確定できていない（Heck Siloも当初想定より曖昧）——これは仕様・検証記録として正直に残す。次段階は、(a) 複数station間のcommodity群一致を診断情報としてさらに定式化する、(b) このままThreshold Calibrationへ進み閾値を暫定的に確定した上で本番接続前の最終検証とする、のいずれかを検討する。
+**production thresholdは引き続き未確定。** 本フェーズを通じて、「明確な単一commodity型のデータ破損」の実例はまだ1件も確定できていない（Heck Siloも当初想定より曖昧）——これは仕様・検証記録として正直に残す。
+
+## 24. Feature B v5: Cross-Station Commodity Pattern Analysis
+
+### 24.1 設計動機と実装
+
+§23の発見（複数stationが同一commodity群・ほぼ同一倍率を示す）を、station間比較として定式化した。`CrossStationPatternInfo`（`commodity_pattern`, `pattern_station_count`, `pattern_price_similarity`）と`compute_cross_station_patterns()`を実装——**分類ロジックにはまだ組み込まない診断情報**。同一の異常commodity集合（frozenset）を持つstationをグルーピングし、共有するstation数と、commodity別value_ratioの変動係数（coefficient of variation、小さいほど倍率が酷似）を計算する。5テスト追加（計638テスト）。
+
+**設計思想**: 独立したデータ破損であれば、複数の無関係なstationが偶然同一のcommodity組み合わせ・酷似した倍率を示すとは考えにくい。したがって**「多数のstationで再現され、倍率が酷似しているパターン」は、破損ではなく実在する共有市場条件である証拠**として扱う。逆に「他のどのstationとも一致しない孤立したパターン」は、破損の可能性を排除できないが、それだけでは確定もできない（単に裏付けがまだない、という中立的な状態）。
+
+### 24.2 実データでの検証
+
+2026-09-05データ（`anomalous_commodity_count>=1`のstation 80件）に適用した結果:
+
+```text
+Heck Silo: pattern={gold, palladium}  pattern_station_count=1（孤立）  similarity=None
+cobalt/osmium/painite/platinumグループ: pattern_station_count=6  similarity=0.00004（倍率がほぼ完全一致）
+
+全体: 15種類の異なるpattern、80 station
+  孤立（count=1）: 4パターン（4 station）
+  共有（count>=2）: 11パターン（76 station）
+```
+
+**80件の異常stationのうち、実に76件（95%）が複数stationで再現されるパターンに属していた**——これらは破損ではなく実在する市場条件である可能性が高いと判断できる。孤立していたのは4件のみで、Heck Siloはその1つだった。
+
+### 24.3 孤立候補4件の個別裏取り: 2件は「参照セットの狭さによる見せかけの孤立」、1件が最有力候補
+
+Heck Silo以外の3件（`Wagner Gateway`/cobalt, `Gupta City`/rutile, `W8Y-WVM`/steel）の全commodity listingを直接確認した:
+
+```text
+Wagner Gateway: 368品目の巨大な希少鉱物市場（periclasedunite, thortveitite, diamond,
+    sapphire等）——cobaltは参照セット30種の中でたまたま検出された1つに過ぎず、
+    実際は既知の「希少鉱物採掘拠点」型と同じ現象。孤立は参照セットの狭さによる見かけ上のもの。
+
+Gupta City: metaalloys, insulatingmembrane, cmmcomposite, neofabricinsulation等
+    （植民地建設船型材料を含む）多様な高額市場——同様に参照セットの狭さによる見せかけの孤立。
+
+W8Y-WVM: 20品目中18品目が正常な双方向market。sell側で価格が設定されているのは
+    steelただ1つ（24,023CR、通常比約5倍）。希少鉱物・建設資材・Thargoid関連品目は
+    一切なし——これまでの調査全体で最も「無関係な単一commodityが説明なく突出する」
+    Heck Silo型に近い、純粋な孤立例。
+```
+
+**結論**: 「孤立している」という判定自体が、参照commodityセット（30種）の狭さのアーティファクトであるケースが多いと判明した——Wagner Gateway/Gupta Cityは実際には既知の広域市場現象の一部であり、真に孤立しているのはW8Y-WVM/steelのみだった。ただしこれも、当該systemの経済状態（Boom等、EDDN commodity/3データからは直接確認できない）による正当な価格上昇である可能性を完全には排除できない。
+
+### 24.4 現状の判定
+
+```text
+異常stationの95%（76/80）: 複数stationで再現される既知の市場パターンに属する → 破損の証拠なし
+孤立candidateのうち2/3: 参照セットの狭さによる見せかけの孤立と判明 → 破損の証拠なし
+残る1件（W8Y-WVM/steel）+ Heck Silo（gold+palladium）: 依然として孤立、破損の可能性を排除できないが確定もできない
+```
+
+production thresholdは引き続き未確定。次段階は、(a) この2件（W8Y-WVM, Heck Silo）を仕様上「Known Suspicious Reference」（確定破損ではなく疑わしい参照例）として明示的に位置づける、(b) 参照commodityセットをさらに拡張して「見せかけの孤立」をこれ以上減らす、(c) このままThreshold Calibrationへ進み暫定閾値を確定した上で最終検証とする、のいずれかを検討する。

@@ -3,13 +3,17 @@ from __future__ import annotations
 import datetime as dt
 
 from app.market.price_plausibility import (
+    CommodityAnomalyDetail,
     CommodityPriceStats,
+    CrossStationPatternInfo,
     PersistenceInfo,
     PriceAnomalyAssessment,
     SellObservation,
+    StationAnomalyProfile,
     assess_station,
     classify,
     compute_commodity_stats,
+    compute_cross_station_patterns,
     compute_global_medians,
     compute_persistence,
     compute_station_anomaly_profile,
@@ -560,3 +564,85 @@ class TestComputeStationAnomalyProfile:
         )
         # no realistic absolute gap clears an intentionally absurd floor
         assert profile.anomalous_commodity_count == 0
+
+
+def _stats(ratio: float) -> CommodityPriceStats:
+    return CommodityPriceStats(percentile=1.0, value_ratio=ratio, value_difference_absolute=ratio * 10000,
+                                max_tie_count=1, max_tie_share=0.01, observation_count=100)
+
+
+def _profile(station_id: int, commodities_and_ratios: dict[str, float]) -> StationAnomalyProfile:
+    details = tuple(CommodityAnomalyDetail(name, _stats(ratio)) for name, ratio in commodities_and_ratios.items())
+    total = sum(d.stats.value_difference_absolute for d in details)
+    concentration = max(d.stats.value_difference_absolute for d in details) / total if details and total else None
+    return StationAnomalyProfile(
+        station_id=station_id, anomalous_commodities=details,
+        anomalous_commodity_count=len(details), anomaly_value_concentration=concentration,
+    )
+
+
+class TestComputeCrossStationPatterns:
+    """§24, Feature B v5: does an anomalous commodity combination
+    reproduce across independent stations (evidence of a real shared
+    market condition), or is it seen at only one station (unconfirmed
+    either way)?"""
+
+    def test_isolated_pattern_has_count_one_and_no_similarity(self):
+        # Heck-Silo-shaped: a pattern nobody else shares.
+        profiles = {1: _profile(1, {"gold": 1.42, "palladium": 1.32})}
+
+        result = compute_cross_station_patterns(profiles)
+
+        assert result[1].pattern_station_count == 1
+        assert result[1].pattern_price_similarity is None
+        assert result[1].commodity_pattern == frozenset({"gold", "palladium"})
+
+    def test_shared_pattern_with_near_identical_ratios_has_low_similarity(self):
+        # the real §23 finding: multiple stations share the exact same
+        # 4-commodity combination at nearly identical ratios.
+        profiles = {
+            1: _profile(1, {"cobalt": 4.22, "osmium": 5.73, "painite": 3.84, "platinum": 5.10}),
+            2: _profile(2, {"cobalt": 4.21, "osmium": 5.73, "painite": 3.84, "platinum": 5.09}),
+            3: _profile(3, {"cobalt": 4.22, "osmium": 5.72, "painite": 3.85, "platinum": 5.10}),
+        }
+
+        result = compute_cross_station_patterns(profiles)
+
+        assert result[1].pattern_station_count == 3
+        assert result[1].pattern_price_similarity < 0.01  # tightly clustered
+        assert result[1].commodity_pattern == frozenset({"cobalt", "osmium", "painite", "platinum"})
+
+    def test_shared_pattern_with_divergent_ratios_has_higher_similarity_value(self):
+        # same commodity SET shared, but the actual ratios differ a lot
+        # -- weaker evidence of one shared real condition.
+        profiles = {
+            1: _profile(1, {"gold": 1.4, "silver": 1.5}),
+            2: _profile(2, {"gold": 3.0, "silver": 4.0}),
+        }
+
+        result = compute_cross_station_patterns(profiles)
+
+        assert result[1].pattern_station_count == 2
+        assert result[1].pattern_price_similarity > 0.2
+
+    def test_different_commodity_sets_are_different_patterns_even_with_overlap(self):
+        # {gold} alone is a DIFFERENT pattern from {gold, palladium} --
+        # a subset match must not be conflated with an exact match.
+        profiles = {
+            1: _profile(1, {"gold": 1.42}),
+            2: _profile(2, {"gold": 1.42, "palladium": 1.32}),
+        }
+
+        result = compute_cross_station_patterns(profiles)
+
+        assert result[1].pattern_station_count == 1
+        assert result[2].pattern_station_count == 1
+        assert result[1].commodity_pattern != result[2].commodity_pattern
+
+    def test_station_with_no_anomalous_commodities_is_absent_from_result(self):
+        profiles = {1: _profile(1, {}), 2: _profile(2, {"gold": 1.42})}
+
+        result = compute_cross_station_patterns(profiles)
+
+        assert 1 not in result
+        assert 2 in result
