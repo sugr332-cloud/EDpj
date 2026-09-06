@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.3
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2実装（§17-18）。Multi-day Stability Validation実施（§19、persistenceを異常度指標に使うべきでないと判明）。Feature B v3: 絶対額フィルタ実装・実データ検証済み（§20、5,000CR floorで無意味な低価格ノイズを59%除去しつつHeck Silo保持を確認）。production thresholdは引き続き未確定
+**Version:** 1.4
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2/v3実装（§17-20）。Multi-day Stability Validation実施（§19、persistenceを異常度指標に使うべきでないと判明）。Commodity Absolute Floor Calibration Study実施（§21）——floor=10,000〜20,000CRの範囲に絞り込み（低価格ノイズ100%除去・既知正例保持を両立）。production thresholdは引き続き未確定（範囲の絞り込みに留める）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -833,3 +833,39 @@ copper: 6件, grain: 5件, polymers: 4件, fruitandvegetables: 4件, coffee: 1�
 1. §19で指摘した「persistenceを異常度スコアに昇格させない」方針の実装——`anomaly_days`/`observed_days`のような診断情報としてのみ保持し、分類ロジックには組み込まない設計
 2. 一過性（1〜2日のみ検出）候補の個別裏取り——Heck Silo型（真の破損候補）を実際に発見できるか
 3. floor値自体（固定CR / commodity相対 / 利益影響ベース）の比較検討
+
+## 21. Commodity Absolute Floor Calibration Study
+
+### 21.1 実施方法
+
+floor候補（None, 500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 25000, 30000, 50000CR）を、事前に定義した4軸で比較した（低価格commodityの定義`global_median<1000CR`は、除去率を見る前に決定——特定のfloorに有利な後付け定義を避けるため）:
+
+```text
+1. 検出数・検出率
+2. 既知正例（Heck Silo）の保持有無 ※確認済み正例はこの1件のみ、n=1という証拠の弱さは明記する
+3. 低価格commodityノイズの除去率（baseline: 286件中153件=53.5%が低価格commodity起因）
+4. 残存候補集合のvalue_difference_absolute中央値・平均値（＝Trade候補としてのprofit影響の代理指標）
+```
+
+### 21.2 実データ結果（2026-09-05）
+
+```text
+     floor  n_flagged   rate  heck_silo  low_price_removed  removal_rate  median_profit_CR  mean_profit_CR
+      None        286  4.96%       True                  0         0.0%             1,516          36,940
+      5000        116  2.01%       True                152        99.3%            14,992          89,831
+     10000        106  1.84%       True                153       100.0%            17,138          97,561
+     15000         58  1.01%       True                153       100.0%           187,032         167,740
+     20000         50  0.87%       True                153       100.0%           200,697         191,883
+     25000         49  0.85%      False                153       100.0%           201,548         195,388
+     30000         49  0.85%      False                153       100.0%           201,548         195,388
+```
+
+### 21.3 発見
+
+1. **Heck Silo保持の上限が判明**: floor<=20,000CRまでは保持され、floor>=25,000CRから脱落する——Heck Siloの`value_difference_absolute`（20,130CR）と正確に一致。**floorをこの値より大きく設定すると、唯一の確認済み正例を失う。**
+2. **低価格ノイズ除去率はfloor=10,000CRで100%に到達**（153/153件全て除去）。floor=5,000CRでも99.3%とほぼ同等。
+3. **profit影響の代理指標に「谷」がある**: floor=10,000CR（中央値17,138CR）からfloor=15,000CR（中央値187,032CR）にかけて急激にジャンプしている。これは母集団が「小〜中規模の変動（〜2万CR）」と「非常に大きな変動（15万CR以上）」に二峰的な構造を持つことを示唆し、**10,000〜20,000CRという範囲が分布上の自然な谷間にあたる**——原理的に閾値を置くのに妥当な位置。
+
+### 21.4 結論
+
+**floor=10,000〜20,000CRの範囲内であれば、低価格ノイズを完全に除去しつつ、既知の唯一の正例（Heck Silo）を保持できる**ことを実データで確認した。**ただし、この範囲を「production threshold確定」とはしない**——確認済み正例が1件のみという証拠の弱さ、複数日での再検証未実施、一過性候補の裏取り未実施という限界があるため。§20.3で挙げた3つの残課題（persistence診断化・一過性候補裏取り・floor比較）のうち3番目が完了し、範囲の絞り込みという形で前進した。次段階は残る2課題（persistence診断情報化、一過性候補の個別裏取り）に進む。
