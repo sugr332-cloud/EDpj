@@ -19,6 +19,7 @@ from app.market.price_plausibility import (
     compute_station_anomaly_profile,
     compute_station_median_ratio,
     dedupe_latest,
+    refine_with_cross_station_pattern,
 )
 
 T0 = dt.datetime(2026, 9, 5, 0, 0, tzinfo=dt.timezone.utc)
@@ -646,3 +647,101 @@ class TestComputeCrossStationPatterns:
 
         assert 1 not in result
         assert 2 in result
+
+
+class TestRefineWithCrossStationPattern:
+    """§25, Provisional Threshold Calibration: combines classify()'s
+    verdict with Feature B v5's cross-station corroboration. Only ever
+    touches COMMODITY_ANOMALY/STRONG_ANOMALY -- never claims
+    "confirmed corruption," only distinguishes "explained by a repeated
+    real market condition" from "not yet explained.\""""
+
+    def test_non_anomalous_labels_pass_through_unchanged(self):
+        assert refine_with_cross_station_pattern("NORMAL", None, shared_pattern_min_stations=2) == "NORMAL"
+        assert refine_with_cross_station_pattern("STATION_ANOMALY", None, shared_pattern_min_stations=2) == "STATION_ANOMALY"
+
+    def test_no_pattern_info_is_suspicious(self):
+        assert refine_with_cross_station_pattern("COMMODITY_ANOMALY", None, shared_pattern_min_stations=2) == "SUSPICIOUS"
+
+    def test_pattern_shared_by_enough_stations_is_known_market_pattern(self):
+        pattern = CrossStationPatternInfo(
+            station_id=1, commodity_pattern=frozenset({"cobalt", "osmium", "painite", "platinum"}),
+            pattern_station_count=6, pattern_price_similarity=0.00004,
+        )
+        assert refine_with_cross_station_pattern("COMMODITY_ANOMALY", pattern, shared_pattern_min_stations=2) == "KNOWN_MARKET_PATTERN"
+
+    def test_pattern_below_threshold_stays_suspicious(self):
+        pattern = CrossStationPatternInfo(
+            station_id=1, commodity_pattern=frozenset({"steel"}), pattern_station_count=1, pattern_price_similarity=None,
+        )
+        assert refine_with_cross_station_pattern("COMMODITY_ANOMALY", pattern, shared_pattern_min_stations=2) == "SUSPICIOUS"
+
+    def test_strong_anomaly_also_refined(self):
+        pattern = CrossStationPatternInfo(
+            station_id=1, commodity_pattern=frozenset({"gold"}), pattern_station_count=1, pattern_price_similarity=None,
+        )
+        assert refine_with_cross_station_pattern("STRONG_ANOMALY", pattern, shared_pattern_min_stations=2) == "SUSPICIOUS"
+
+
+class TestKnownSuspiciousReferences:
+    """§24.3/§25: fixed regression cases using the REAL numbers found
+    for W8Y-WVM and Heck Silo on 2026-09-05. These are explicitly
+    "Known Suspicious References," never "Known Positive"/"Confirmed
+    Corruption" -- no external ground truth confirmed either as
+    genuine data corruption. Any future change to classify(),
+    compute_station_anomaly_profile(), or compute_cross_station_patterns()
+    must keep both of these SUSPICIOUS (not silently reclassified as
+    KNOWN_MARKET_PATTERN or NORMAL) unless a deliberate, documented
+    design change explains why."""
+
+    BASE_KWARGS = dict(station_ratio_threshold=1.3, commodity_percentile_threshold=0.99,
+                        commodity_max_tie_share_threshold=0.01, commodity_value_ratio_threshold=1.3,
+                        commodity_absolute_floor=15000)
+
+    def test_w8y_wvm_steel_case_remains_suspicious(self):
+        # real shape: 20 commodities, only steel elevated (~5x, ~19,210cr
+        # absolute gap), nothing else remarkable -- §24.3.
+        stats = CommodityPriceStats(percentile=0.999, value_ratio=4.99, value_difference_absolute=19210,
+                                     max_tie_count=1, max_tie_share=0.001, observation_count=800)
+        assessment = PriceAnomalyAssessment(
+            station_id=3707315456, station_median_ratio=1.05, worst_commodity_name="steel",
+            worst_commodity_stats=stats, n_reference_commodities=1,
+        )
+        label = classify(assessment, **self.BASE_KWARGS)
+        pattern_info = CrossStationPatternInfo(
+            station_id=3707315456, commodity_pattern=frozenset({"steel"}),
+            pattern_station_count=1, pattern_price_similarity=None,
+        )
+        assert refine_with_cross_station_pattern(label, pattern_info, shared_pattern_min_stations=2) == "SUSPICIOUS"
+
+    def test_heck_silo_gold_palladium_case_remains_suspicious(self):
+        # real shape: gold ratio=1.42/diff=20130, palladium ratio=1.32/
+        # diff=17390, station_median_ratio=1.073 (normal) -- §16.3/§23.2.
+        stats = CommodityPriceStats(percentile=1.0, value_ratio=1.42, value_difference_absolute=20130,
+                                     max_tie_count=1, max_tie_share=0.0002, observation_count=5467)
+        assessment = PriceAnomalyAssessment(
+            station_id=4223685123, station_median_ratio=1.073, worst_commodity_name="gold",
+            worst_commodity_stats=stats, n_reference_commodities=25,
+        )
+        label = classify(assessment, **self.BASE_KWARGS)
+        pattern_info = CrossStationPatternInfo(
+            station_id=4223685123, commodity_pattern=frozenset({"gold", "palladium"}),
+            pattern_station_count=1, pattern_price_similarity=None,
+        )
+        assert refine_with_cross_station_pattern(label, pattern_info, shared_pattern_min_stations=2) == "SUSPICIOUS"
+
+    def test_known_market_pattern_group_is_not_suspicious(self):
+        # real shape: cobalt/osmium/painite/platinum, 6 stations,
+        # near-identical ratios -- §24.2, contrast case.
+        stats = CommodityPriceStats(percentile=1.0, value_ratio=5.10, value_difference_absolute=243467,
+                                     max_tie_count=1, max_tie_share=0.0002, observation_count=800)
+        assessment = PriceAnomalyAssessment(
+            station_id=4338552835, station_median_ratio=1.15, worst_commodity_name="platinum",
+            worst_commodity_stats=stats, n_reference_commodities=4,
+        )
+        label = classify(assessment, **self.BASE_KWARGS)
+        pattern_info = CrossStationPatternInfo(
+            station_id=4338552835, commodity_pattern=frozenset({"cobalt", "osmium", "painite", "platinum"}),
+            pattern_station_count=6, pattern_price_similarity=0.00004,
+        )
+        assert refine_with_cross_station_pattern(label, pattern_info, shared_pattern_min_stations=2) == "KNOWN_MARKET_PATTERN"

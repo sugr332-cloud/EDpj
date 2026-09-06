@@ -497,3 +497,36 @@ def compute_cross_station_patterns(
                 pattern_price_similarity=similarity,
             )
     return result
+
+
+def refine_with_cross_station_pattern(
+    label: str,
+    pattern_info: CrossStationPatternInfo | None,
+    shared_pattern_min_stations: int,
+) -> str:
+    """Provisional Threshold Calibration (design doc §25) -- combines
+    classify()'s Feature A/B verdict with Feature B v5's cross-station
+    corroboration to separate "explained by a real, reproduced market
+    condition" from "still unconfirmed either way." Only refines
+    COMMODITY_ANOMALY/STRONG_ANOMALY labels; NORMAL/STATION_ANOMALY pass
+    through unchanged (this function has no opinion on station-level
+    anomalies, only on the commodity-level signal §24 investigated).
+
+    Returns "KNOWN_MARKET_PATTERN" when `pattern_info` shows the
+    station's exact anomalous-commodity combination is shared by at
+    least `shared_pattern_min_stations` independent stations (§24.2's
+    cobalt/osmium/painite/platinum group: 6 stations, ratio similarity
+    0.00004) -- evidence FOR a real shared condition, not corruption.
+
+    Returns "SUSPICIOUS" when no such corroboration exists (pattern_info
+    is None, or its pattern is seen at fewer than the threshold) --
+    this does NOT mean "confirmed corruption," only "not yet explained
+    by cross-station repetition." §24.3's W8Y-WVM and Heck Silo both
+    remain SUSPICIOUS under this definition -- they are the project's
+    Known Suspicious References (not Known Positives): plausible
+    candidates for genuine anomalies, never claimed as confirmed."""
+    if label not in ("COMMODITY_ANOMALY", "STRONG_ANOMALY"):
+        return label
+    if pattern_info is not None and pattern_info.pattern_station_count >= shared_pattern_min_stations:
+        return "KNOWN_MARKET_PATTERN"
+    return "SUSPICIOUS"

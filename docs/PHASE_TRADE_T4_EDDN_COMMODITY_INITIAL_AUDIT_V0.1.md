@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.6
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2-v5実装（§17-24）。Cross-Station Pattern Analysisにより、異常station 80件中76件（95%）が複数stationで再現される既知の市場パターンと判明——真に孤立した候補はW8Y-WVM（steel）とHeck Silo（gold+palladium）の2件のみに絞り込めた（§24）。production thresholdは引き続き未確定
+**Version:** 1.7
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2-v5実装（§17-24）。Cross-Station Pattern Analysisにより、異常station 80件中76件（95%）が複数stationで再現される既知の市場パターンと判明——真に孤立した候補はW8Y-WVM（steel）とHeck Silo（gold+palladium）の2件のみに絞り込めた（§24）。W8Y-WVM/Heck Siloを「Known Suspicious Reference」として固定し（`refine_with_cross_station_pattern`）、実データでProvisional Threshold Calibrationを実施（§25）——commodity_absolute_floorの安全域を10,000〜19,210CR以下に訂正、参照セットの狭さに起因する例外（Gupta City）を確認。**依然Provisionalであり、Production Thresholdは未確定**。Historical/chronological validation・Leakage-safe validationが残課題
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -979,3 +979,83 @@ W8Y-WVM: 20品目中18品目が正常な双方向market。sell側で価格が設
 ```
 
 production thresholdは引き続き未確定。次段階は、(a) この2件（W8Y-WVM, Heck Silo）を仕様上「Known Suspicious Reference」（確定破損ではなく疑わしい参照例）として明示的に位置づける、(b) 参照commodityセットをさらに拡張して「見せかけの孤立」をこれ以上減らす、(c) このままThreshold Calibrationへ進み暫定閾値を確定した上で最終検証とする、のいずれかを検討する。
+
+## 25. Provisional Threshold Calibration（暫定閾値校正）
+
+### 25.1 方針（レビュー方向の確認）
+
+§24の結論を受け、レビューでは **(a)を採用し、次に(c)へ進む** ことが指示された。(b)（参照セット拡張）は最終検証時の感度分析として後回しとし、いま追いかけると調査が終わらないリスクがあるため見送る。
+
+(a)の実装として、`refine_with_cross_station_pattern(label, pattern_info, shared_pattern_min_stations)` を追加した（`app/market/price_plausibility.py`）。`classify()` のCOMMODITY_ANOMALY/STRONG_ANOMALY判定を受け取り、`CrossStationPatternInfo`で「同一異常commodity組み合わせを共有するstationが`shared_pattern_min_stations`件以上あるか」で二次分岐する:
+
+- `KNOWN_MARKET_PATTERN`: 複数stationで再現される既知の市場パターン（§24.2のcobalt/osmium/painite/platinumグループ等）→ 破損の証拠なしと扱う
+- `SUSPICIOUS`: 裏付けなし（`pattern_info`がNone、または共有station数が閾値未満）→ **「破損確定」ではなく「まだ説明がついていない」という中立状態**
+- NORMAL/STATION_ANOMALY はこの関数の対象外でそのまま通過
+
+W8Y-WVM・Heck Siloがこの新ロジックの下でも一貫して`SUSPICIOUS`に留まることを保証する固定回帰テスト（`TestKnownSuspiciousReferences`、実測値を直接埋め込み）を追加した。将来`classify()`や`compute_station_anomaly_profile()`/`compute_cross_station_patterns()`を変更した際、この2件を無自覚に再分類してしまわないための安全網。`TestRefineWithCrossStationPattern`（5件）とあわせてテスト計11件追加、スイート全体646件が全てpass。
+
+### 25.2 校正スイープ（実データ、2026-09-05）
+
+6軸評価のうち軸1・2・3・5・6を、`commodity_absolute_floor` ∈ {10000, 15000, 20000} × `shared_pattern_min_stations` ∈ {2,3,4,5} のグリッドサーチで検証した（軸4「cross-station pattern説明性」は§24で既に実証済みのため本スイープでは再検証しない）。station_ratio_threshold=1.3、commodity_percentile_threshold=0.99、commodity_max_tie_share_threshold=0.01、commodity_value_ratio_threshold=1.3は§16-20の既存値を暫定的に据え置いた。
+
+```text
+   floor shared_min suspicious known_pattern  w8y_wvm  heck_silo  low_price_leak  median_profit
+   10000          2          5           106     True       True               0         18,932
+   10000          3         13            98     True       True               0         18,932
+   10000          4         19            92     True       True               0         19,210
+   10000          5         27            84     True       True               0         27,226
+   15000          2          3            60     True       True               0         19,210
+   15000          3          7            56     True       True               0         19,817
+   15000          4         10            53     True       True               0         86,893
+   15000          5         14            49     True       True               0         63,278
+   20000          2          1            53    False       True               0         20,130
+   20000          3          3            51    False       True               0        209,071
+   20000          4          6            48    False       True               0        156,551
+   20000          5         10            44    False       True               0        125,257
+```
+
+**スクリプトのバグと修正（正直な記録）**: この結果を得るまでに、校正用スクリプト（`app/`配下には含まれないスクラッチパッド上の診断スクリプト）に選定バイアスのバグがあった。`station_median_ratio is not None`でstationを事前フィルタしてから`classify()`にかけていたため、参照commodityが1件しかないW8Y-WVM（Feature A=station_median_ratioが計算不能。§13.1の設計上、`min_reference_commodities`未満のstationはFeature Aが`None`になる仕様通り）が全12組み合わせから丸ごと除外され、「W8Y-WVMが常にfalseになる」という誤った結果を最初に得た。`classify()`自体は`station_median_ratio=None`を正しく`station_anomalous=False`として扱う（コード側は無傷）ため、事前フィルタを削除し全stationを`assessments`に含めて再実行し、上記の正しい結果を得た。**ライブラリコードのバグではなく、診断スクリプト側の選定バイアスだった**——ただしこの種の見落としが実データ結果の解釈を誤らせかねない点は、これまでの§16（selection bias）と同種の教訓として明記しておく。
+
+### 25.3 軸1（既知疑わしいケースの保持）: floor≤15,000で両方保持、floor=20,000でW8Y-WVMが脱落
+
+上表の通り、`floor=10000`・`floor=15000`では、`shared_pattern_min_stations`をいくつに変えてもW8Y-WVM・Heck Siloは共に`SUSPICIOUS`のまま保持される。しかし`floor=20000`ではW8Y-WVMが**脱落**する（`False`）。
+
+原因はW8Y-WVMの実測`value_difference_absolute`（steel: 24,023CR - 中央値4,813CR = **19,210CR**）が20,000CRを下回るため。`_is_commodity_anomalous()`の判定は`value_difference_absolute >= commodity_absolute_floor`なので、floorが19,210CRを超えるとW8Y-WVM自身がこの条件を満たさなくなる。
+
+**これは§21（Floor Calibration Study）の結論に対する訂正である。** §21は「floor 10,000-20,000CRの範囲」を安全域としたが、今回の実測でこの範囲の**上限そのもの（20,000CR）がW8Y-WVMを脱落させる**ことが判明した。両方の既知疑わしい参照例を同時に保持するための安全なfloor範囲は、より正確には **10,000CR 〜 19,210CR以下**（W8Y-WVM自身の実測ギャップが上限を規定する）と訂正する。
+
+### 25.4 軸2（共有市場パターンの除外）: 安定して機能、ただし参照セットの狭さに起因する例外1件を確認
+
+`known_pattern`列は全組み合わせで44〜106件と、floor/shared_minに応じて滑らかに変動しており、`KNOWN_MARKET_PATTERN`への分類が閾値変更に対して急激に崩れることはない。
+
+ただし`floor=15000, shared_min=2`の`SUSPICIOUS`集合（3件）を個別に確認したところ:
+
+```text
+Heck Silo / LHS 1351:                    worst=gold   ratio=1.42 diff=20,130
+W8Y-WVM / Col 285 Sector LM-B a43-4:      worst=steel  ratio=4.99 diff=19,210
+Gupta City / Lacaille 9352:               worst=rutile ratio=8.20 diff=18,932
+```
+
+**Gupta Cityが再出現している。** §24.3で「参照セット30種の狭さによる見せかけの孤立」と既に説明済みの候補（全115品目中、植民地建設材料を含む広域市場の一部で、rutileはたまたま参照セットに含まれた1品目に過ぎない）が、floor/shared_min次第では`SUSPICIOUS`側に再分類されてしまう。これは`refine_with_cross_station_pattern()`のロジック自体の欠陥ではなく、**§24.3で既に認識していた参照commodityセットの限界がそのまま暫定閾値の出力にも反映されている**ことの再確認であり、(b)（参照セット拡張）を最終感度分析として残す根拠を補強する実例として記録する。
+
+### 25.5 軸3（低価格commodityノイズ除外）: floor≥10,000で完全に抑制
+
+`low_price_leak`（`SUSPICIOUS`の`worst_commodity_name`がglobal_median<1,000CRの低価格commodityである件数）は、テストした12組み合わせ全てで**0**。§20で確認したfloorの効果が、この広いグリッド全体で安定して再現された。
+
+### 25.6 軸5（profit impact、`median_profit`）: floor/shared_minに応じて増加傾向、閾値選択が実務的な意味を持つ
+
+`SUSPICIOUS`集合の`value_difference_absolute`中央値は、floorが上がり`suspicious`件数が絞られるほど大きくなる傾向がある（floor=10000,shared_min=2の18,932CRからfloor=20000,shared_min=5の125,257CRまで）——件数を絞るほど、残る候補は「経済的インパクトの大きい」ケースに寄っていく。ただしこれは母集団が小さい（最小1件、最大27件）ため中央値のブレも大きく、この段階では傾向の確認以上の結論は出せない。
+
+### 25.7 軸6（閾値変更に対する安定性）: W8Y-WVM/Heck Siloの保持は floor≤15,000 で完全に安定、`suspicious`件数自体は不安定
+
+W8Y-WVM/Heck Silo保持という**バイナリな信号**はfloor≤15,000の範囲で`shared_pattern_min_stations`の値によらず完全に安定している。一方`suspicious`の**総数**はfloor=10000,shared_min=2の5件からfloor=10000,shared_min=5の27件まで大きく変動し、`shared_pattern_min_stations`の選び方だけでも5倍以上開く。したがって「既知参照例の保持」は閾値選択に対して頑健だが、「`SUSPICIOUS`集合全体の規模・構成」はまだ閾値に敏感——これは§25.4のGupta City再出現とも整合する。
+
+### 25.8 暫定結論（Provisional、Production Thresholdではない）
+
+**これは暫定閾値校正であり、Production Thresholdの確定ではない。** レビュー方針の通り、この結果をもって生産投入判断とはしない。
+
+- `commodity_absolute_floor`は**10,000CR〜19,210CR以下**の範囲であればW8Y-WVM・Heck Siloを両方保持できることを実データで確認した（§21の結論をより正確な上限に訂正）
+- `refine_with_cross_station_pattern()`による共有市場パターン除外は安定して機能するが、参照commodityセット（30種）の限界に起因する例外（Gupta City）が閾値次第で再出現しうることを確認した——(b)を最終検証時の感度分析として残す根拠
+- `SUSPICIOUS`集合の総数・構成は閾値に対してまだ不安定であり、この暫定校正だけでは単一の「正しい」閾値の組を選び出すことはできない
+
+次段階は、レビュー方針で示された流れ（暫定閾値 → 既知参照例保持確認[本節で実施] → 共有市場パターン除外確認[本節で実施] → Historical/chronological validation → Leakage-safe validation → Production Go/No-Go）のうち、Historical/chronological validationとLeakage-safe validationが残っている。これらは本節の暫定校正とは別の検証段階であり、混同しないこと。
