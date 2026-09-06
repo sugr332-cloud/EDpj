@@ -1,6 +1,6 @@
 # EDpj Phase Plan — Trade Market Persistence Analysis
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Status:** Binding Phase Plan Amendment  
 **Date:** 2026-09-06  
 **Depends on:** `docs/PHASE_FORMULA_VALIDATION_AMENDMENT_V0.1.md` and `docs/SPECIFICATION_TRADE_MARKET_PERSISTENCE_AMENDMENT_V0.1.md`
@@ -24,6 +24,8 @@ Trade validation flow becomes:
         ↓
 2-6F-T1 Trade Market Persistence Analysis
         ↓
+2-6F-T4 External Market Source Feasibility / Multi-Station Trade Data Validation
+        ↓
 2-6D Recommendation / Ranking diagnostic
         ↓
 2-6E Existing model evaluation / adoption decisions
@@ -35,6 +37,8 @@ Trade validation flow becomes:
 ```
 
 `2-6F-T1` is a Trade-specific evidence gate. Trade Formula Validation must not claim stronger temporal reliability without this analysis or an explicit `INSUFFICIENT` result.
+
+`2-6F-T4` is the separate external-source feasibility gate. It determines whether external market sources can provide sufficiently broad, historical, reproducible, and temporally grounded multi-station Trade data. The size of the current EDpj cache must not be treated as evidence about game-wide Trade coverage.
 
 ## 3. 2-6F-T1 — Historical market observation persistence
 
@@ -255,7 +259,9 @@ The result of this phase becomes an input to the existing Formula Validation Gat
 ```text
 Trade Market Persistence
         ↓
-understand external-data temporal reliability
+External Market Source Feasibility
+        ↓
+understand external-data temporal reliability and coverage
         ↓
 Trade formula baseline
         ↓
@@ -268,4 +274,6 @@ production adoption
 
 The persistence analysis does not itself validate the Trade profit formula. It establishes the empirical reliability characteristics of the market observations on which that formula would depend.
 
-**Binding conclusion:** EDpj must first measure how often external market prices and profitable Trade opportunities survive 5/10/15/30/60/120-minute elapsed-time windows, and how long it takes before material price decreases are observed, using only available historical observations. No unsupported arrival-time probability may be claimed.
+`2-6F-T4` must separately establish whether an external source has enough multi-station historical coverage, chronological replayability, freshness, provenance, reuse conditions, and accuracy for EDpj to use it as a production evidence source. It must not treat external-site `profit_per_hour` as validated unless EDpj independently validates the transport-time model.
+
+**Binding conclusion:** EDpj must first measure how often external market prices and profitable Trade opportunities survive 5/10/15/30/60/120-minute elapsed-time windows, and how long it takes before material price decreases are observed, using only available historical observations. In parallel, external-source feasibility must be empirically validated before broad multi-station Trade data is adopted. No unsupported arrival-time probability may be claimed.
