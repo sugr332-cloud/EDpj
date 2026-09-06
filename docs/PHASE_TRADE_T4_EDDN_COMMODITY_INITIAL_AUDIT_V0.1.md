@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C/T4-D第1回）
 
-**Version:** 0.6
-**Status:** T4-A/B/C 完了。T4-D第1回実証+Accuracy Check（§12）+Price Plausibility特徴量の設計・実証（§13、n=4例でP99付近の分離を確認、閾値は未確定）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（閾値確定・本番実装・Distance/Jump統合が未完了）
+**Version:** 0.7
+**Status:** T4-A/B/C/D 完了（§14）。`station_median_ratio`を正式特徴量として採用、本番閾値はDistance/Jump統合後に実データ蓄積してから確定する方針。次段階: Distance/Jump Integration
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -10,7 +10,7 @@
 T4-A  Initial Unfiltered EDDN Commodity/3 Audit（単一日、§1-§6）        → 完了
 T4-B  EDDN Commodity Daily Distribution Audit（14日以上、§9）          → 完了
 T4-C  Commodity Master / Provenance Audit（§10）                       → 完了
-T4-D  Trade Candidate Construction（§11）                              → 第1回実証完了、Accuracy未検証
+T4-D  Trade Candidate Construction（§11-14）                           → 完了（§14、閾値確定は将来課題として保留）
 ```
 
 ## 1. 目的と位置づけ
@@ -506,4 +506,22 @@ Internal distribution check  → PASS WITH FINDINGS（2つの破損station発見
 Price Plausibility特徴量      → 設計・実証完了（station_median_ratio、n=4例でP99付近の分離を確認）
 閾値確定                     → 未確定（次段階、より多くのサンプルが必要）
 Market Classification        → 2軸（構造+価格妥当性）の設計を確立、実装（本番コード化）は未着手
+```
+
+## 14. T4-D完了判定
+
+**T4-Dは完了扱いとする。** 判断根拠:
+
+```text
+station構造フィルタ（10品目以上の双方向market）        → PASS
+price corruption特徴量（station_median_ratio）         → PASS（既知4例で分離実証済み）
+production threshold（P99等の本番閾値固定）             → UNRESOLVED（意図的——n=4での確定は時期尚早）
+```
+
+`station_median_ratio`を正式な特徴量として採用する。閾値は未確定のまま、Distance/Jump統合パイプラインへ実際に組み込みながら実データを蓄積し、後日Threshold Calibrationとして別途確定する（統合と閾値確定は独立した作業であり、統合を先に進めても後から閾値モデルを差し替え可能な構造にしておけばよい）。
+
+**残課題として記録**（修正タスク、閾値確定と同様に別途対応）: `price_plausibility_feature.py`の重複配信除去バグ——同一station・同一commodityの当日複数回配信を重複除去せずに集計していたため、`n_reference_commodities`等の表示件数が実際より膨らんでいた（例: Heck Silo表示182件、実際は約7件）。計算結果（`station_median_ratio`の値そのもの）は重複が同一価格の繰り返しであるため歪んでいないが、本番実装時には`(station_id, commodity)`単位での重複排除を先に行う必要がある。
+
+```text
+次段階: Distance / Jump Integration
 ```
