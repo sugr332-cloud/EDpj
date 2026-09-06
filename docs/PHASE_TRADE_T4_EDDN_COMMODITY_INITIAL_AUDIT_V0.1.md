@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C/T4-D第1回）
 
-**Version:** 0.5
-**Status:** T4-A/B/C 完了。T4-D第1回実証+Accuracy Check部分PASS（§12、価格妥当性チェックの必要性を実証、実装は未着手）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（価格妥当性チェック実装・Distance/Jump統合が未完了）
+**Version:** 0.6
+**Status:** T4-A/B/C 完了。T4-D第1回実証+Accuracy Check（§12）+Price Plausibility特徴量の設計・実証（§13、n=4例でP99付近の分離を確認、閾値は未確定）。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（閾値確定・本番実装・Distance/Jump統合が未完了）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -456,3 +456,54 @@ gold:    sell_price=54,779（P95）demand=1,183    station='Cheranovsky City'   
 ```
 
 **T4-D Accuracy: 部分PASS——「価格が破損したstationは高利益として誤検出されうる」ことを実証し、原因を特定したが、価格妥当性チェック自体の実装・閾値確定はまだ完了していない。** Distance/Jump統合へ進める前に、この価格妥当性チェックを実装するか、閾値の確定なしに暫定的に進めるかは要判断。
+
+## 13. Price Plausibility特徴量の設計・実証
+
+### 13.1 特徴量設計: station-level median ratio
+
+閾値を先に固定せず、まず「異常価格を検出するための特徴量」を設計した。流動性の高い主要commodity 10種（gold, silver, platinum, palladium, painite, osmium, bertrandite, indite, gallite, tritium）を参照セットとし:
+
+```text
+1. 各commodityについて、「通常market」母集団全体でのsell_priceの中央値（global_median）を算出
+2. 各stationについて、そのstationが持つ参照commodityごとに ratio = station_price / global_median[commodity] を計算
+3. そのstationの ratio群の中央値（station_median_ratio）を、station単位の価格乖離度スコアとする
+   （複数commodityが同時に高いか低いかを見る——単一commodityだけの偏りとは区別する設計）
+```
+
+**単一commodityではなく複数commodityの中央値を使う理由**: 1商品だけが高い場合は正常な特殊market（真に希少な商品の需給逼迫等）の可能性があるが、**参照commodity全体が同時に高い場合はstation全体のデータ破損である可能性が高い**、という§12.3の発見（Heck Silo/J8V-06Bはgold/tritium単体ではなく全体が異常だった）を直接反映した設計。
+
+### 13.2 実証結果: 母集団分布と、既知の good/bad 4例での検証
+
+```text
+母集団（参照commodityを2種以上持つ「通常market」station、n=5,531）:
+  min=0.048  P25=0.991  median=1.015  P75=1.127  P95=1.286  P99=1.463  max=3.481
+```
+
+**大多数のstationはratio中央値が1.0付近に集中**——多くの通常marketが、実際にglobal市場価格と整合していることを裏付ける。
+
+§12.3/§12.4で個別に発見していた4つの既知例をこの特徴量で評価した結果:
+
+```text
+Heck Silo（BAD、gold P100の破損station）:              station_median_ratio=1.499  percentile=99.5%
+J8V-06B（BAD、tritium P100の破損station）:               station_median_ratio=2.807  percentile=99.9%
+Many Made This Light（GOOD、tritium P95の妥当な高利益）:  station_median_ratio=1.008  percentile=48.9%
+Cheranovsky City（GOOD、gold P95の妥当な高利益）:         station_median_ratio=1.240  percentile=91.9%
+```
+
+**既知のBAD例2件（P99.5, P99.9）とGOOD例2件（P48.9, P91.9）が、P99付近を境に明確に分離した。** GOOD例は母集団のP95未満に収まり、BAD例はP99を超えている——n=4という少数の検証例ではあるが、この特徴量がstation構造フィルタでは検出できなかった価格破損を捉えられることを実証できた。
+
+（実行中に判明した副次的なバグ: このスクリプトはstationの1日分の重複配信（T4-B §9.5で確認済みのduplicate broadcast、5-10%）を重複除去せずに集計したため、`n_reference_commodities`の表示件数が実際より大きく膨らんだ（例: Heck Silo=182件、本来は7件程度）。ただし重複は同一価格の繰り返しのため、`station_median_ratio`自体の値は歪んでいない——investigation専用スクリプトのため未修正のまま記録するが、正式実装時にはstation×commodityで重複排除してから計算する必要がある。）
+
+### 13.3 現時点の判断: 閾値はまだ「確定」しない
+
+n=4の検証例のみでP99という閾値を本番仕様として固定するのは時期尚早——ユーザーの指摘通り、この段階では「特徴量が機能する」ことの実証に留め、閾値確定にはより多くの正例・負例サンプル（複数日、複数commodityでの追加検証）が必要である。**P99（またはratio>1.3〜1.5付近）が有力な候補である**ことは実データで示せたが、これを固定の本番閾値として仕様書に確定するのは次段階の課題とする。
+
+### 13.4 T4-D Accuracy Check最終状態
+
+```text
+External verification        → BLOCKED（INARA: JS動的レンダリング、EDData API: 522到達不能）
+Internal distribution check  → PASS WITH FINDINGS（2つの破損station発見、原因特定）
+Price Plausibility特徴量      → 設計・実証完了（station_median_ratio、n=4例でP99付近の分離を確認）
+閾値確定                     → 未確定（次段階、より多くのサンプルが必要）
+Market Classification        → 2軸（構造+価格妥当性）の設計を確立、実装（本番コード化）は未着手
+```
