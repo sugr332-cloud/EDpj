@@ -1,7 +1,7 @@
-# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B）
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B/T4-C）
 
-**Version:** 0.2
-**Status:** T4-A: INITIAL AUDIT PASS / DISTRIBUTION UNRESOLVED → T4-Bで解決。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（T4-C/T4-D未実施）
+**Version:** 0.3
+**Status:** T4-A/T4-B/T4-C 完了。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（T4-D未実施、Accuracy checkも未実施）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -9,7 +9,7 @@
 ```text
 T4-A  Initial Unfiltered EDDN Commodity/3 Audit（単一日、§1-§6）        → 完了
 T4-B  EDDN Commodity Daily Distribution Audit（14日以上、§9）          → 完了
-T4-C  Commodity Master / Provenance Audit                              → 未着手
+T4-C  Commodity Master / Provenance Audit（§10）                       → 完了
 T4-D  Trade Candidate Construction                                     → 未着手
 ```
 
@@ -204,4 +204,92 @@ T4-A/B結論: EDDN commodity/3は広域・複数station・複数systemのMarket�
             存在するため、単日ではなく分布（中央値・範囲）に基づく設計とする。
         ↓
 次: T4-C（Commodity Master / Provenance Audit）へ
+```
+
+## 10. T4-C: Commodity Master / Provenance Audit
+
+### 10.1 C-1: Commodity Master照合 — 結論から言うと「28.5%がjunk」は誤りだった
+
+**架空のマスタを作らず、実在するコミュニティ標準データ（`EDCD/FDevIDs`、EDMC等が実際に使用）を取得して照合した。** EDCDはEDDN自体の運営元でもあるコミュニティ組織。
+
+初回はEDCD/FDevIDsの`commodity.csv`（一般commodity 270種）のみと照合し、`unknown`が27.73%（1日分、541種、576万行）という大きな値が出た。しかし中身を見ると`lavianbrandy`・`karsukilocusts`・`thehuttonmug`等、**全て実在する正規のElite Dangerous commodity**だった——**参照マスタが不完全だった**（レアグッズ/地域特産品カテゴリが`commodity.csv`に含まれていなかった）。
+
+`rare_commodity.csv`（142種）を発見・追加し、common+rare合計412種のマスタで再照合した結果:
+
+```text
+対象日: 2026-09-05（distinct commodity名 1,472種、total rows 20,876,334）
+
+KNOWN（common+rareマスタと一致）:  802 distinct名, 20,866,401行（99.952%）
+MALFORMED（構造的に不正）:         382 distinct名,      9,357行（0.045%）
+UNKNOWN（どちらでもない）:         288 distinct名,        576行（0.003%）
+```
+
+**KNOWN分類の802 distinct名がマスタの412種より多い理由**: 大文字小文字の表記ゆれ（同じcommodityを異なるcasingで送るuploaderクライアントが複数存在）。正規化時は小文字化してから照合する必要がある——将来永続化する際の正規commodity名は単一の正規化された表記に統一すべき。
+
+**残る0.003%のUNKNOWN**: `Fruit and Vegetables`のように、内部symbol名（`fruitandvegetables`）ではなく**表示名（display name）**をそのまま`name`フィールドへ送っている少数のクライアントによるもの。件数は各2件のみ（特定の1クライアントによるものと推測）。
+
+**結論**: ユーザー指摘の通り「28.5%をそのままjunkとして扱うのはまだ早い」は正しかった。**参照マスタを正しく（common+rare）揃えれば、実際の不正データ率は0.05%未満**。これは仕様書§C-4のTrade候補構築における実用上の閾値として採用できる。
+
+### 10.2 Reuse conditions（マスタデータのライセンス確認）
+
+`EDCD/FDevIDs`リポジトリのライセンスを確認したところ、**GitHub API上でも`license: None`、READMEにも明示的なライセンス表記なし**。EDCDはEDDN自体の運営母体であり、EDMC等のコミュニティツールで広く使われている実績があるが、正式な再配布・利用許諾条件は明示されていない。
+
+**したがって、Bioの`EDMC-BioScan`（GPL-2.0）と同じ扱いとする**: FDevIDsのCSVをリファレンスとして照合・検証に使うことは問題ないが、EDpjが将来正式な`CommodityMaster`を永続化する場合は、このCSVをそのまま丸ごとvendoring（同梱・再配布）せず、独自にコンパイルする（複数ソースで裏取りする、または最小限必要なsymbol↔category対応のみを独自に整理する）。
+
+### 10.3 C-2: Provenance（追跡可能性の設計確認）
+
+実データで既に確認済みの追跡可能なフィールド（Bio調査で`scanorganic/1`について確認したのと同じenvelope構造）:
+
+```text
+header.uploaderID          （匿名化されたアップローダー識別子）
+header.softwareName        （アップロードに使われたツール名、例: "EDO Materials Helper"）
+header.softwareVersion
+header.gatewayTimestamp    （EDDN gateway受信時刻、observed_atとの差分でfreshness計測可能——T4-Aで実施済み）
+message.marketId           （station識別子）
+message.systemName / stationName
+message.timestamp          （ゲーム内Market.json生成時刻 = observed_at）
+```
+
+これらを組み合わせれば「いつ・どこから・どのツールで・どのstationについて送られたか」を全て追跡可能。**設計としては十分な情報が揃っている**——実際にDBスキーマへ組み込むのはT4-Dの実装対象とする。
+
+### 10.4 C-3: Duplicate / Replay処理（設計提案、未実装）
+
+T4-Bで確認したduplicate broadcast rate（5-10%）への対処として、以下を設計提案する（コード実装はT4-Dで）:
+
+```text
+dedup key候補: (station_id, commodity_name, observed_at)
+  同一keyで複数回受信 → broadcast重複として1件に統合（BioObservationの
+  upsert_if_olderと同種のロジックが転用できる）
+
+ただし、同一station・同一commodityでもprice/stock/demandが変化していれば
+別の実観測として扱う必要がある。単純に(station_id, commodity_name, observed_at)
+だけで一意化すると、真に価格が更新された観測を誤って「重複」として捨てて
+しまう可能性がある——observed_at（Market.json生成時刻）が変われば別観測、
+という現状の設計（BioObservationと同じ「同一(station,commodity)キーで最古を
+残す」ではなく、Market価格は時系列データとして全timestampを保持する必要が
+あり、Bioのspecies存在有無とは性質が異なる）。
+```
+
+### 10.5 C-4: Trade候補としての利用条件（仕様化）
+
+T4-Bの実測結果（`buy_rate`約65-70%、`sell_rate`約98.9%、`supply_rate`約15-17%、`demand_rate`約43-51%）を踏まえ、以下をTrade候補構築の必須条件として仕様化する:
+
+```text
+購入可能条件（source station）: buy_price > 0 AND supply > 0
+販売可能条件（destination station）: sell_price > 0 AND demand条件（要検証、下記）
+```
+
+**`demand=0`の意味論について、ユーザーから「無限需要を意味する場合がある」との指摘があったが、EDDN公式スキーマ（`commodity-v3.0.json`）を直接確認したところ、`demand`は単なる`integer`型としか定義されておらず、0に特別な意味（無限需要）を与える記述は見つからなかった。** `commodity-README.md`にも同様の記述はない。**この主張は現時点で公式ソースから検証できていない未確認情報として扱う**——鵜呑みにせず、T4-Dでのcandidate構築時に実データ（demand=0の実際の観測パターン）で改めて検証する。それまでは保守的に`demand > 0`を販売可能条件とする。
+
+`NonMarketable`（Limpets等）・`legality`による除外はEDDN公式スキーマ（`commodity-README.md`）で明記されており確認済み——ただしJournal由来データではこれらのフィールド自体が既に除外されている可能性があり、EDpj側での追加フィルタが必要かはT4-Dで確認する。
+
+### 10.6 T4-C結論
+
+```text
+C-1 Commodity Master照合    → 完了（実際のjunk率0.05%未満、参照マスタ不備が主因と判明）
+C-2 Provenance              → 設計確認完了（必要フィールドは全て取得可能）
+C-3 Duplicate/replay        → 設計提案完了（未実装、T4-Dで実装）
+C-4 Trade候補利用条件        → 仕様化完了（demand=0の意味論は未検証のまま保守的に扱う）
+        ↓
+次: T4-D（Trade Candidate Construction）へ
 ```
