@@ -1,7 +1,7 @@
-# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump Integration）
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration）
 
-**Version:** 0.8
-**Status:** T4-A/B/C/D 完了（§14）。Distance/Jump Integration実装・実データ検証済み（§15、価格妥当性チェックの結論を独立に裏付け）。残課題: production threshold確定、duplicate除去バグ修正、本番DB永続化
+**Version:** 0.9
+**Status:** T4-A/B/C/D完了・Distance/Jump Integration完了（§15）。Threshold Calibration実施中、重複除去バグ修正＋参照commodity拡張により§12.3/§13の一部結論を訂正（§16——station全体の破損という当初結論は選択バイアスによる誤りで、station-level/commodity-level 2指標の併用が必要と判明）。production threshold・duplicate除去含む本番実装は引き続き未確定
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -569,3 +569,62 @@ Duplicate除去バグ（§13.2）          → 未修正（別タスクとして
 ```
 
 Distance/Jump統合は実装・実データ検証まで完了。次は、この統合パイプラインを使った実データ蓄積を経てのThreshold Calibration、または総合Trade Rankingへの接続が課題として残る。
+
+## 16. Threshold Calibration — 重要な訂正: 当初の「station全体が破損」という結論は一部誤りだった
+
+### 16.1 重複除去バグ修正後・参照commodity拡張（10→30種）での再計算
+
+`app/market/price_plausibility.py`（重複配信を正しく除去、`dedupe_latest`は`(station_id, commodity)`ごとに最新観測のみ保持）で、参照commodityを流動性の高い30種（元の10種 + water/grain/basicmedicines等の生活必需品、aluminium/copper/steel等の工業金属）に拡張し、2026-09-05を再計算した:
+
+```text
+重複除去前のsell観測: 1,498,350件 → 重複除去後: 151,249件（(station,commodity)ペア）
+  ※ 重複率は約90%——1つのstationの1日の市場更新が平均して何度も再配信されている
+    （T4-B §9.5で確認した5-10%という数字は「メッセージ単位」の重複率であり、
+    「(station,commodity)ペアが日内に何回観測されるか」で見るとこれよりずっと多い）
+
+station_median_ratio分布（n=5,769、min_reference_commodities=3）:
+  min=0.053  P50=0.996  P90=1.075  P95=1.089  P99=1.107  max=1.692
+```
+
+**§13の分布（P99=1.463, max=3.481）よりはるかにタイトになった。** 重複バグ・小さい参照セット（10種）の両方が、以前の分布を実態よりも広く見せていたと考えられる。
+
+### 16.2 既知の「BAD」station、再計算後の実態
+
+```text
+J8V-06B: 正しく重複除去すると参照commodity該当数が1種（tritiumのみ）に減り、
+         min_reference_commodities=3を満たさず、station_median_ratioの対象外になった
+         （§13段階では重複バグにより「2件」とカウントされ、閾値min=2をたまたま満たしていた
+         ——つまりバグが偶然この station を検出可能にしていた）
+
+Heck Silo: station_median_ratio = 1.073（P89.3）——★極端な外れ値ではない★
+    25参照commodityの内訳（一部抜粋）:
+      aluminium=1.07, basicmedicines=0.98, beryllium=1.02, gallite=1.01,
+      hydrogenfuel=1.10, lithium=1.06, polymers=1.07, steel=1.07,
+      superconductors=1.04, tantalum=1.03, titanium=1.07, tritium=1.07,
+      uranium=1.03, water=0.71, grain=0.80          ← 大半は正常範囲
+      cobalt=2.08, rutile=2.05, coffee=1.50, tea=1.43, gold=1.42,
+      palladium=1.32, silver=1.33                    ← やや高い
+      fruitandvegetables=3.78, osmium=4.35, platinum=3.85  ← 明確に高い
+```
+
+**§12.3で「ほぼ全ての高額commodityが実際の相場の3〜5倍」と結論したのは誤りだった。** これは「sell_price上位10件」という絶対価格順のサンプルを目視した結果であり、**高額commodity（platinum/osmium等）は元々価格が高いため、異常な倍率のcommodityが上位に来やすいという選択バイアス**があった。実際には25種中の大半（15種程度）は母集団と整合する正常な価格で、一部（5〜8種）だけが実際に高い。station_median_ratioという中央値ベースの特徴量は、この偏ったサンプリングの影響を受けず、正しく「station全体としては極端ではない」（P89.3）と判定していた——**§12.3の manual investigation の結論より、station_median_ratio特徴量の判定の方が正確だった**、という結果になる。
+
+### 16.3 一方、gold単体では依然としてP100の外れ値
+
+```text
+gold（重複除去後の母集団、n=5,467）: median=47,663  P95=55,853  P99=56,345  max=67,793
+Heck Silo の gold=67,793 → 依然として母集団の絶対最大値（P100）
+```
+
+**station全体では正常範囲（P89.3）なのに、gold という1商品だけを見るとP100の外れ値**——station-level median ratioとcommodity単体でのpercentileが食い違うケースが実在することが判明した。
+
+### 16.4 Calibrationにおける結論
+
+1. **station_median_ratio特徴量自体は妥当**——重複バグ・選択バイアスを除去した後も、母集団の大半（P90未満）は1.0付近に集中する健全な分布を示しており、特徴量設計は正しい。
+2. **ただし単一の特徴量だけでは不十分**——station全体の中央値が正常でも、特定の1commodityだけがそのcommodity自身の母集団内で極端な外れ値（P100等）になっているケースを検出できない（Heck Silo/gold）。逆に、参照commodityが少なすぎるstation（J8V-06B）は、そもそも判定不能（INSUFFICIENT）になる。
+3. **したがって最終的なMarket Classificationには、station-level median ratioとcommodity-level percentileの両方を独立に見る必要がある。** どちらか一方が閾値を超えたら要注意、という設計が妥当と考えられるが、これも今回のn=1事例（Heck Silo/gold）のみでの示唆であり、閾値の確定にはまだ足りない。
+4. **§13で「P99付近で既知4例がきれいに分離した」という結果は、重複バグと選択バイアスの影響を受けた状態での結果だった。** 訂正後も特徴量の有用性自体は支持されるが、「P99で綺麗に分離する」という具体的な主張は撤回し、より慎重な評価が必要という結論に修正する。
+
+### 16.5 現時点の判断
+
+**production thresholdはまだ確定しない。** 今回の訂正は、拙速な閾値確定を避けるという§13/§14の判断が正しかったことを裏付けている。次段階として、station-level ratioとcommodity-level percentileの2つの指標を组み合わせた分類ロジックを設計し、より多くの実例（複数日、複数commodityカテゴリ）で検証する必要がある。
