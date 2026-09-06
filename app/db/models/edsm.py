@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BigInteger, DateTime, Float, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -34,6 +34,31 @@ class BodyPhysicalParameters(Base):
     surface_temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     atmosphere_type: Mapped[str | None] = mapped_column(String, nullable=True)
     volcanism_type: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Extended candidate features (design doc §5.8) -- fetched but NOT
+    # yet used by any distance function/model. Added to evaluate
+    # per-feature contribution before committing to a redesigned k-NN
+    # feature set, per the explicit "candidate first, model change
+    # later" review directive. All nullable: EDSM does not populate
+    # every field for every body (e.g. stars have none of these).
+    earth_masses: Mapped[float | None] = mapped_column(Float, nullable=True)
+    radius: Mapped[float | None] = mapped_column(Float, nullable=True)
+    surface_pressure: Mapped[float | None] = mapped_column(Float, nullable=True)
+    atmosphere_composition: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    solid_composition: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    terraforming_state: Mapped[str | None] = mapped_column(String, nullable=True)
+    distance_to_arrival: Mapped[float | None] = mapped_column(Float, nullable=True)
+    orbital_period: Mapped[float | None] = mapped_column(Float, nullable=True)
+    orbital_eccentricity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rotational_period: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "Handle with caution" (design doc §5.8): surface material
+    # composition percentages. Stored for future evaluation only --
+    # explicitly not a candidate for the next distance-function pass
+    # without a separate justification, since its causal relationship
+    # to species presence (vs. just correlating with sub_type/body
+    # formation) hasn't been assessed.
+    materials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     retrieved_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.timezone.utc)
     )

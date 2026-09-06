@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.bio.body_parameters import ensure_body_parameters_cached, get_body_parameters
+from app.bio.body_parameters import backfill_extended_parameters, ensure_body_parameters_cached, get_body_parameters
 from app.db.models.edsm import BodyPhysicalParameters
 
 DECIAT_BODIES_RESPONSE = {
@@ -98,3 +98,71 @@ class TestEnsureBodyParametersCached:
         rows = db_session.query(BodyPhysicalParameters).filter_by(system_address=42).all()
         assert len(rows) == 1
         assert rows[0].body_id == 1
+
+    def test_extracts_extended_candidate_features(self, db_session):
+        response = {
+            "bodies": [
+                {
+                    "id": 1901, "bodyId": 11, "name": "Deciat 1", "type": "Planet", "subType": "Metal-rich body",
+                    "gravity": 1.2, "surfaceTemperature": 1006, "atmosphereType": "No atmosphere",
+                    "volcanismType": "Minor Metallic Magma", "earthMasses": 0.5, "radius": 3000.0,
+                    "surfacePressure": 0.01, "atmosphereComposition": {"Carbon dioxide": 100.0},
+                    "solidComposition": {"Rock": 70.0, "Metal": 30.0}, "terraformingState": "Not terraformable",
+                    "distanceToArrival": 500.0, "orbitalPeriod": 100.0, "orbitalEccentricity": 0.01,
+                    "rotationalPeriod": 2.0, "materials": {"Iron": 20.0, "Nickel": 15.0},
+                },
+            ]
+        }
+        client = _client({"https://www.edsm.net/api-system-v1/bodies?Deciat": response})
+
+        ensure_body_parameters_cached(db_session, 1, "Deciat", client)
+
+        row = get_body_parameters(db_session, 1, 11)
+        assert row.earth_masses == 0.5
+        assert row.radius == 3000.0
+        assert row.surface_pressure == 0.01
+        assert row.atmosphere_composition == {"Carbon dioxide": 100.0}
+        assert row.solid_composition == {"Rock": 70.0, "Metal": 30.0}
+        assert row.terraforming_state == "Not terraformable"
+        assert row.distance_to_arrival == 500.0
+        assert row.orbital_period == 100.0
+        assert row.orbital_eccentricity == 0.01
+        assert row.rotational_period == 2.0
+        assert row.materials == {"Iron": 20.0, "Nickel": 15.0}
+
+
+class TestBackfillExtendedParameters:
+    def test_updates_only_extended_columns_on_already_cached_row(self, db_session):
+        initial_response = {
+            "bodies": [
+                {"id": 1901, "bodyId": 11, "name": "Deciat 1", "type": "Planet", "subType": "Metal-rich body",
+                 "gravity": 1.2, "surfaceTemperature": 1006, "atmosphereType": "No atmosphere",
+                 "volcanismType": "Minor Metallic Magma"},
+            ]
+        }
+        client = _client({"https://www.edsm.net/api-system-v1/bodies?Deciat": initial_response})
+        ensure_body_parameters_cached(db_session, 1, "Deciat", client)
+
+        backfill_response = {
+            "bodies": [
+                {"id": 1901, "bodyId": 11, "name": "Deciat 1", "type": "Planet", "subType": "Metal-rich body",
+                 "gravity": 1.2, "surfaceTemperature": 1006, "atmosphereType": "No atmosphere",
+                 "volcanismType": "Minor Metallic Magma", "earthMasses": 0.5, "radius": 3000.0},
+            ]
+        }
+        client2 = _client({"https://www.edsm.net/api-system-v1/bodies?Deciat": backfill_response})
+
+        updated = backfill_extended_parameters(db_session, 1, "Deciat", client2)
+
+        assert updated == 1
+        row = get_body_parameters(db_session, 1, 11)
+        assert row.earth_masses == 0.5
+        assert row.radius == 3000.0
+        assert row.gravity == 1.2  # core column untouched, still correct
+
+    def test_no_edsm_data_returns_zero_updated(self, db_session):
+        client = _client({"https://www.edsm.net/api-system-v1/bodies?Nowhere": {}})
+
+        updated = backfill_extended_parameters(db_session, 999, "Nowhere", client)
+
+        assert updated == 0

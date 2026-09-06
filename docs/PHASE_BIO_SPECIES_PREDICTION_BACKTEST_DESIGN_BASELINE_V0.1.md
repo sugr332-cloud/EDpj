@@ -247,9 +247,25 @@ Brier score自体は改善した（0.186→0.180、個々の`p(s)`単体とし�
 
 **Probability Calibration Evaluation: NOT ADOPTED**。この較正mappingはValue Formulaに採用しない。60% gateはFAILのまま。
 
-### 5.7 次段階
+### 5.7 診断4: 特徴量寄与監査 — 距離計算は正常、現行5特徴量の説明力不足を確認
 
-観測不足仮説（否定）・確率較正（不採用）の2つの原因仮説を実データで潰したうえで、次はk-NNのdistance calculation・neighbor selection・feature contributionの詳細監査（各特徴量が距離にどれだけ寄与しているか）に進む。モデル変更（k変更、特徴量重み変更、閾値処理等）はまだ行わない。
+`uploader_count>=2`・単一species確定・`predicted/actual>=10`倍のケースについて、target/近傍5件の全項目（gravity, surface_temperature, atmosphere, volcanism, sub_type）と各項目の距離への寄与を表形式で監査した。全件でカテゴリカル3項目は完全一致（不一致0件）、数値寄与も0.0001未満がほとんど——**距離計算・近傍選択のロジックは正常**。それでも近傍の80〜100%にStratum Tectonicas（19,010,800）が存在する一方、target（複数独立CMDRで単一species確認済み）には存在しない、という分岐が繰り返し観測された。近傍側自体もuploader_count 2〜5と十分に確認済みであり、「近傍がノイズ」という説明も成立しない。
+
+**58.4%は「FAIL baseline」として凍結する**（構造的限界と確定するのはまだ早い——追加特徴量の評価前に確定させない）。
+
+### 5.8 現行5特徴量の限界候補: EDSM未使用フィールドの調査
+
+生EDSMレスポンス（`api-system-v1/bodies`）を確認したところ、現在使用中の5項目（gravity, surfaceTemperature, atmosphereType, volcanismType, subType）以外に、以下のフィールドが取得可能であることを確認した（今まで取得・保存していなかった）:
+
+```text
+優先度高: earthMasses, radius, surfacePressure, atmosphereComposition, solidComposition, terraformingState
+優先度中: distanceToArrival, orbitalPeriod, orbitalEccentricity, rotationalPeriod
+慎重に扱う: materials（表面材質組成 -- species存在との因果関係が未評価。sub_typeとの相関による疑似効果の可能性があり、次の距離関数候補には含めない）
+```
+
+`BodyPhysicalParameters`にこれら11項目をnullable列として追加し（`app/db/models/edsm.py`）、`_row_from_edsm_body`で抽出、`backfill_extended_parameters()`で既にキャッシュ済みの837システムに対して再取得・バックフィルを実施した（既存の5核心列は変更せず、新規列のみ更新——再インポートではなくバックフィル）。
+
+**次段階**: 新モデルを組む前に、まず診断4で特定した「Stratum Tectonicas誤検出」ケース（targetとStratum陽性近傍）について、これらの新規特徴量がtarget/neighbor間で実際に異なるかを確認する（安価な検証、モデル変更は伴わない）。差があれば距離関数への組み込みを検討し、fit/holdout分離・k・閾値・SpeciesValueMaster・60% gateをすべて固定した状態で58.4%との比較backtestを行い、別seedでも再現するかを確認する。差がなければ、k-NNというモデル構造そのものの限界を疑う段階に進む。
 
 ## 6. Acceptance Tests
 

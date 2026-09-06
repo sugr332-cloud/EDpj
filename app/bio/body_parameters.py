@@ -63,6 +63,17 @@ def _row_from_edsm_body(system_address: int, body: dict) -> dict | None:
         "surface_temperature": body.get("surfaceTemperature"),
         "atmosphere_type": body.get("atmosphereType"),
         "volcanism_type": body.get("volcanismType"),
+        "earth_masses": body.get("earthMasses"),
+        "radius": body.get("radius"),
+        "surface_pressure": body.get("surfacePressure"),
+        "atmosphere_composition": body.get("atmosphereComposition"),
+        "solid_composition": body.get("solidComposition"),
+        "terraforming_state": body.get("terraformingState"),
+        "distance_to_arrival": body.get("distanceToArrival"),
+        "orbital_period": body.get("orbitalPeriod"),
+        "orbital_eccentricity": body.get("orbitalEccentricity"),
+        "rotational_period": body.get("rotationalPeriod"),
+        "materials": body.get("materials"),
     }
 
 
@@ -87,6 +98,42 @@ def ensure_body_parameters_cached(
     rows = [row for b in bodies if (row := _row_from_edsm_body(system_address, b)) is not None]
     upsert_ignore(session, BodyPhysicalParameters, rows, ["system_address", "body_id"])
     session.commit()
+
+
+_EXTENDED_FIELDS = [
+    "earth_masses", "radius", "surface_pressure", "atmosphere_composition",
+    "solid_composition", "terraforming_state", "distance_to_arrival",
+    "orbital_period", "orbital_eccentricity", "rotational_period", "materials",
+]
+
+
+def backfill_extended_parameters(session: Session, system_address: int, system_name: str, client: HttpClient) -> int:
+    """Re-fetches `system_name` from EDSM and fills in ONLY the extended
+    candidate-feature columns (design doc §5.8 -- earthMasses, radius,
+    surfacePressure, atmosphereComposition, solidComposition,
+    terraformingState, distanceToArrival, orbitalPeriod,
+    orbitalEccentricity, rotationalPeriod, materials) on rows already
+    cached for `system_address`. Never touches the 5 original core
+    columns and never inserts new rows -- this is a backfill for
+    systems fetched before these columns existed, not a re-import.
+    Returns the number of rows updated (0 if EDSM has no data)."""
+    bodies = fetch_system_bodies(system_name, client)
+    if bodies is None:
+        return 0
+
+    updated = 0
+    for b in bodies:
+        row = _row_from_edsm_body(system_address, b)
+        if row is None:
+            continue
+        extended_values = {field: row[field] for field in _EXTENDED_FIELDS}
+        updated += (
+            session.query(BodyPhysicalParameters)
+            .filter_by(system_address=system_address, body_id=row["body_id"])
+            .update(extended_values)
+        )
+    session.commit()
+    return updated
 
 
 def get_body_parameters(session: Session, system_address: int, body_id: int) -> BodyPhysicalParameters | None:
