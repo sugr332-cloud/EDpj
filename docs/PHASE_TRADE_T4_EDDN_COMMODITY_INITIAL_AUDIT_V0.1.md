@@ -1,9 +1,17 @@
-# Phase 2-6F-T4 — Initial Unfiltered EDDN Commodity/3 Audit
+# Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/T4-B）
 
-**Version:** 0.1
-**Status:** IN PROGRESS — intermediate result, not a T4 PASS/FAIL/INSUFFICIENT verdict
+**Version:** 0.2
+**Status:** T4-A: INITIAL AUDIT PASS / DISTRIBUTION UNRESOLVED → T4-Bで解決。T4全体としてはまだPASS/FAIL/INSUFFICIENT未確定（T4-C/T4-D未実施）
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
+
+**Phase breakdown（本セッションで確定した区切り）:**
+```text
+T4-A  Initial Unfiltered EDDN Commodity/3 Audit（単一日、§1-§6）        → 完了
+T4-B  EDDN Commodity Daily Distribution Audit（14日以上、§9）          → 完了
+T4-C  Commodity Master / Provenance Audit                              → 未着手
+T4-D  Trade Candidate Construction                                     → 未着手
+```
 
 ## 1. 目的と位置づけ
 
@@ -124,3 +132,76 @@ Bioの`scanorganic/1`調査で見られた同種の異常（1.2%が想定取り�
 ## 8. 運用上の注意（設計判断ではなく、記録として残す）
 
 1日で約1,600万行という規模はBioの`BioObservation`（14日で12,114行)と比べて3〜4桁大きい。将来的にEDDN commodity/3を広く取り込む設計を行う場合、生ログの逐次INSERTは非現実的であり、集計・重複排除・保持期間の設計が別途必要になる。本書はこの論点を記録するのみで、設計判断は行わない。
+
+## 9. T4-B: EDDN Commodity Daily Distribution Audit（14日間、2026-08-23〜2026-09-05）
+
+### 9.1 目的
+
+§6.2で発見した2026-08-06の外れ値（station数が他日の約3倍）を受け、単一日を代表値として扱うことを避け、**連続14日間**の分布（median/P10/P25/P75/P90/min/max/CV）を確定した。全て無フィルタ・投機なしの実測値。
+
+### 9.2 station数カウント方式の食い違いを発見・解決（reproducibility項目に直結する重要な確認）
+
+分布計算の過程で、同じ2026-09-04を過去（T4-A、§2-3）と今回（T4-B）で別々に取得した結果、`unique_stations`が**9,316（T4-A）と8,221（T4-B）で食い違う**ことに気づいた。これはT4仕様§6「reproducibility（決定論的に再取得・再現できるか）」に直結する重大な懸念のため、放置せず原因を確認した。
+
+```text
+HTTPヘッダで同一ファイルであることを確認:
+  content-length = 117,963,352バイト（初回HEAD確認時と完全一致）
+  last-modified  = Sat, 05 Sep 2026 01:35:07 GMT（変化なし）
+```
+
+**アーカイブファイル自体は不変・再現可能だった。** 食い違いの真因はカウント方式の違い:
+
+```text
+message-level（メッセージにmarketIdが存在すれば1 station）:  9,316
+row-level（commodity行を1件以上持つmessageのみ）:            8,221
+差分 = 1,095 station（commoditiesリストが空のメッセージ5,198件に由来）
+```
+
+一部のstationはcommodityリストが空のまま報告されている（取引品目データがまだない、または一時的にゼロの状態）。**「station」の定義を「row-level（実際に取引可能なcommodityを1件以上持つ）」に統一する**——Trade候補構築では空のstationは使えないため、この定義がBuy/Sell候補構築の実用上一貫している。T4-Bの14日間は全てrow-level定義で統一済み（内部で矛盾はない）。
+
+### 9.3 14日間の分布（row-level定義で統一）
+
+```text
+                                min      P10      P25    median      P75      P90      max     CV
+unique_stations                7,429    7,919    8,111    8,266    9,426   10,370   10,589   0.113
+unique_systems                 5,494    5,650    5,748    5,974    6,674    7,189    7,694   0.103
+unique_commodities（生の値）      590      802      948      972      995    1,257    1,472   0.199
+station×commodity series   1,537,000 1,539,000 1,590,000 1,655,000 1,865,000 2,047,000 2,457,000 0.144
+buy_rate                     0.6516   0.6519   0.6533   0.6566   0.6703   0.6973   0.7026   0.025
+sell_rate                    0.9861   0.9880   0.9885   0.9893   0.9902   0.9925   0.9946   0.002
+supply_rate                  0.1151   0.1194   0.1490   0.1657   0.1666   0.1676   0.1677   0.119
+demand_rate                  0.4315   0.4373   0.4734   0.5017   0.5038   0.5071   0.5089   0.053
+commodity_junk_row_rate*     0.0557   0.0560   0.0563   0.0570   0.0581   0.0596   0.0604   0.026
+duplicate_broadcast_rate     0.0484   0.0497   0.0507   0.0564   0.0625   0.0920   0.1018   0.264
+malformed_rate                    0        0        0        0        0        0        0   0.000
+```
+（* commodity_junk_row_rateは`$`始まり・`tissuesample`含有の構造的ヒューリスティックのみ。正規commodity masterによる正式分類はT4-C。）
+
+`new_station_rate`（前日までの累積既知station集合に対する新規率、初日100%を除く）: min=26.82%, median=38.27%, max=59.18% — 14日を通じて累積既知station数は増加し続けており、**単日スナップショットは全体のstation母集団を大きく過小評価する**。
+
+### 9.4 §6.2の外れ値（2026-08-06）の再評価
+
+今回の連続14日間（2026-08-23〜2026-09-05）では、station数はmax 10,589までしか到達せず、2026-08-06のmessage-levelでの31,259という値には遠く及ばない（row-level換算でも同程度に低いと推定される）。**2026-08-06は依然として未解明の外れ値のままであり**、今回の14日間には同種の急上昇は再現されなかった。原因不明のまま「稀に発生しうる外れ値」として記録し、T4-C/T4-D設計では中央値・分布ベースの指標を用いる（単日の最大値・特定1日の数値には依存しない）。
+
+### 9.5 ポジティブな新知見（14日間で確認）
+
+- **`sell_rate`が極めて高く安定**（median 98.93%、CV=0.002）——ほぼ全てのstationがほぼ全commodityを買い取る。
+- **`buy_rate`は約65-70%で安定**（CV=0.025）——station×commodity系列の3分の2が実際にBuy可能。
+- **`supply_rate`は約15-17%と低い**（CV=0.119）——buy_price>0でもsupply=0（在庫なし）のケースが多数存在する。Trade候補構築では`buy_price>0`だけでなく`supply>0`を明示的に要件化する必要がある。
+- **`malformed_rate`は14日間全て0%**——EDDNメッセージのパース自体は極めて安定。
+- **`duplicate_broadcast_rate`は5-10%程度**（同一station×timestampの重複配信）——本番取り込み設計では重複排除が必要（BioObservationで既に実装済みの`upsert_if_older`と同種のロジックが転用できる）。
+
+### 9.6 T4-B結論
+
+```text
+T4-A: INITIAL AUDIT PASS / DISTRIBUTION UNRESOLVED
+        ↓
+T4-B: 14日間の分布を確定、station定義の食い違いを解決・統一
+        ↓
+T4-A/B結論: EDDN commodity/3は広域・複数station・複数systemのMarketデータを
+            安定して提供している（reproducibility確認済み、malformed 0%、
+            sell_rate/buy_rate安定）。ただし2026-08-06のような未解明の外れ値も
+            存在するため、単日ではなく分布（中央値・範囲）に基づく設計とする。
+        ↓
+次: T4-C（Commodity Master / Provenance Audit）へ
+```
