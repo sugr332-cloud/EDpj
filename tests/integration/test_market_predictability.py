@@ -68,6 +68,37 @@ class TestEnsureDaysFetchedBatch:
             db_session.query(MarketHistoricalObservation).filter_by(station_id=200, commodity_name="gold").count() == 1
         )
 
+    def test_persists_buy_price_supply_and_gateway_timestamp_when_present(self, db_session):
+        # Phase 2-6F-T1: these fields were previously extracted by
+        # parse_commodity_message() and then discarded here -- now kept.
+        date = NOW.date()
+        envelope = _envelope(
+            100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 40000, "demand": 5, "buyPrice": 39000, "stock": 12}]
+        )
+        envelope["header"]["gatewayTimestamp"] = f"{date:%Y-%m-%d}T10:00:05Z"
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day([envelope])})
+
+        ensure_days_fetched_batch(db_session, [(100, "platinum")], [date], client)
+
+        row = db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").one()
+        assert row.buy_price == 39000
+        assert row.supply == 12
+        # SQLite doesn't round-trip tzinfo (project-wide known quirk) --
+        # compare naive, as every other datetime assertion in this codebase does.
+        assert row.received_at == dt.datetime(2026, 8, 20, 10, 0, 5)
+
+    def test_received_at_is_none_when_envelope_has_no_gateway_timestamp(self, db_session):
+        date = NOW.date()
+        envelope = _envelope(100, f"{date:%Y-%m-%d}T10:00:00Z", [{"name": "platinum", "sellPrice": 1, "demand": 1}])
+        client = FakeStreamingHttpClient({_archive_url(date): _compress_day([envelope])})
+
+        ensure_days_fetched_batch(db_session, [(100, "platinum")], [date], client)
+
+        row = db_session.query(MarketHistoricalObservation).filter_by(station_id=100, commodity_name="platinum").one()
+        assert row.received_at is None
+        assert row.buy_price == 0
+        assert row.supply == 0
+
     def test_second_call_does_not_refetch_already_covered_dates(self, db_session):
         date = NOW.date()
         client = FakeStreamingHttpClient({_archive_url(date): _compress_day([])})

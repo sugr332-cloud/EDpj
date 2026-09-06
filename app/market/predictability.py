@@ -23,6 +23,7 @@ from app.collectors.eddn import MalformedEddnMessage, parse_commodity_message
 from app.collectors.eddn_archive import StreamingHttpClient, iter_commodity_day
 from app.db.models.market import MarketHistoricalFetchLog, MarketHistoricalObservation, MarketPredictability
 from app.db.upsert import upsert_ignore, upsert_preserve_columns
+from app.journal.parser import parse_journal_timestamp
 from app.market.volatility import Observation, demand_change_ratio, median_and_p95, pair_observations, price_change_ratio
 
 # Operational default -- NOT a statistically optimal window. Phase 2-6's
@@ -70,6 +71,22 @@ def ensure_days_fetched(
     ensure_days_fetched_batch(session, [(station_id, commodity_name)], dates, client)
 
 
+def _archive_gateway_timestamp(envelope: dict) -> dt.datetime | None:
+    """None when the envelope has no (or a malformed) header.gatewayTimestamp
+    -- never falls back to "now", since that would silently relabel an
+    unknown historical receipt time as a fabricated one."""
+    header = envelope.get("header")
+    if not isinstance(header, dict):
+        return None
+    raw = header.get("gatewayTimestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return parse_journal_timestamp(raw)
+    except ValueError:
+        return None
+
+
 def ensure_days_fetched_batch(
     session: Session,
     targets: list[tuple[int, str]],
@@ -111,8 +128,16 @@ def ensure_days_fetched_batch(
             message = envelope.get("message")
             if not isinstance(message, dict) or message.get("marketId") not in missing_station_ids:
                 continue
+            # Archive rows use the envelope's own gatewayTimestamp (when
+            # EDDN itself received this message) as received_at, not
+            # "now" (when this backfill happened to run) -- unlike the
+            # live listener (app/collectors/eddn.py), which really does
+            # receive messages close to real time, an archive replay's
+            # wall-clock is meaningless for Trade Market Persistence's
+            # observed_at/received_at gap analysis (Phase 2-6F-T1).
+            received_at = _archive_gateway_timestamp(envelope)
             try:
-                rows = parse_commodity_message(message, received_at=dt.datetime.now(dt.timezone.utc))
+                rows = parse_commodity_message(message, received_at=received_at)
             except MalformedEddnMessage:
                 continue
             for row in rows:
@@ -128,7 +153,10 @@ def ensure_days_fetched_batch(
                     "commodity_name": row["commodity_name"],
                     "sell_price": row["sell_price"],
                     "demand": row["demand"],
+                    "buy_price": row["buy_price"],
+                    "supply": row["supply"],
                     "observed_at": row["observed_at"],
+                    "received_at": row["received_at"],
                 }
                 for row in matches_by_target[target]
             ]

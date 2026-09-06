@@ -72,7 +72,7 @@ def _schema_name(schema_ref: str) -> str | None:
     return None
 
 
-def parse_commodity_message(message: dict[str, Any], received_at: dt.datetime) -> list[dict]:
+def parse_commodity_message(message: dict[str, Any], received_at: dt.datetime | None) -> list[dict]:
     """commodity/3 `message` -> market_snapshots rows (source='eddn').
     `name`/`buyPrice`/`sellPrice`/`stock`/`demand` are already EDDN's
     normalized field names (commodity `name` is the bare internal name,

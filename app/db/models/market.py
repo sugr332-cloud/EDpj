@@ -94,7 +94,17 @@ class MarketHistoricalObservation(Base):
     a (station_id, commodity_name) that was actually queried, never a
     galaxy-wide import. `commodity_name` matches MarketLatest's existing
     key convention, not the spec's commodity_id (never populated
-    anywhere in this project)."""
+    anywhere in this project).
+
+    `buy_price`/`supply`/`received_at` (Phase 2-6F-T1,
+    docs/PHASE_2_6F_T1_TRADE_MARKET_PERSISTENCE_DESIGN_BASELINE_V0.1.md
+    §2) are nullable: `app/collectors/eddn.py`'s parse_commodity_message()
+    already extracts them from the raw archive envelope, but
+    ensure_days_fetched_batch() discarded them before this Trade-specific
+    need existed. NULL means "observed before these columns were
+    tracked", never backfilled as 0 or any other guess -- existing rows
+    stay NULL until (if ever) their date range is deliberately
+    re-fetched."""
 
     __tablename__ = "market_historical_observations"
     __table_args__ = (
@@ -108,7 +118,10 @@ class MarketHistoricalObservation(Base):
     commodity_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
     sell_price: Mapped[int] = mapped_column(Integer, nullable=False)
     demand: Mapped[int] = mapped_column(Integer, nullable=False)
+    buy_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    supply: Mapped[int | None] = mapped_column(Integer, nullable=True)
     observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    received_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MarketHistoricalFetchLog(Base):
