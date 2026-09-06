@@ -216,7 +216,40 @@ verdict          = FAIL（60%未満、ただし30.4%から大幅改善）
 
 最も外れが大きいケースは全て**単一species body**で、予測値が実測の10〜18倍という極端な過大評価だった（例: 予測19,210,800 vs 実測1,000,000）。これらは環境条件が「複数の高価値speciesが同時に存在する近傍」と一致するため、marginal確率が複数speciesにそれぞれ高い値を割り当てるが、当該bodyでは1種類（低価値のBacterium系）しか観測されていない、というケース。
 
-**未確定の仮説（次の調査対象）**: 外部母集団（EDDN `scanorganic/1`）は、あるbodyについて実際に発見されうる全speciesを必ずしも網羅していない可能性がある——1人のCMDRが全genusを走査するとは限らず、archive収集期間内に一部のspeciesしか報告されていないbodyでは、「観測species = 実在species」という前提（ground truth側の仮定）自体が過小申告になっている可能性がある。これはvalue formula側の欠陥ではなく、ground truthの完全性（observation completeness）の問題であり、次の診断対象とする。
+### 5.4 診断1: 「観測不足」仮説 — 実データで否定
+
+**仮説**: 外部母集団（EDDN `scanorganic/1`）は、あるbodyについて実際に発見されうる全speciesを必ずしも網羅していない可能性がある——1人のCMDRが全genusを走査するとは限らず、archive収集期間内に一部のspeciesしか報告されていないbodyでは、「観測species = 実在species」という前提（ground truth側の仮定）自体が過小申告になっている可能性がある。
+
+**検証方法の訂正**: 当初「生の報告件数（raw report count）」で検証しようとしたが、raw envelopeの`header.uploaderID`と`message.ScanType`（`Log`/`Sample`）を確認した結果、**生報告件数は1種を確定させるのに必要なスキャン工程数の副産物**であり（単一species body 2,509件中93.9%が`raw_report_count=3`で一致）、観測機会の指標にならないことが判明。代わりに**ユニークな`uploaderID`数（独立CMDR訪問数）**を真の観測網羅度の代理指標として採用した。
+
+**結果**: 単一species holdout body（n=175）全件で、`uploader_count`と予測誤差の相関はほぼゼロ（`corr(uploader_count, predicted/actual比) = -0.0088`、`corr(uploader_count, relative_error) = -0.0114`）。最悪の過大予測ケースには、**3人の独立したCMDRが別々に同一bodyを訪れ全員が同一の単一speciesのみを確認したにもかかわらず12倍過大予測**、という例が含まれる。
+
+**判定**: 観測不足仮説は支持されない。原因は他にある。
+
+### 5.5 診断2: k近傍監査 — 距離計算は正常、species構成が環境的に近いbody間でも分岐する
+
+`uploader_count>=2`・単一species確定・`predicted/actual>=10`倍のケースについてk近傍5件の特徴量を監査した結果、カテゴリカル3項目（atmosphere/volcanism/sub_type）は全件で完全一致（不一致0件）、数値距離も0.002〜0.02と極めて小さく、**距離計算・近傍選択は設計通り機能している**ことを確認した。
+
+問題は、環境的にほぼ同一と判定されたbody間でも実際のspecies構成にばらつきがあり、そのばらつきの中に高価値species（例: Stratum Tectonicas, 19,010,800）が混入すると、marginal確率による期待値計算が大きく増幅されること。過大予測ミス111件中、Stratum Tectonicasが19件で「p>=0.6だが実在しない」false positiveとして関与（最多）。
+
+### 5.6 診断3: Species Probability Calibration — 有効だが不採用（Value Formula accuracyを悪化させる）
+
+**測定**: k近傍のmarginal確率`p(s)`をbucket別に集計し実測出現率と比較したところ、低確率帯（p=0.2, 0.4）はほぼ較正済みだが、高確率帯特に`p=1.0`で明確な過信を確認（実測出現率0.860、100%ではない）。
+
+**較正手法の検証（fitデータのみ、holdout非参照）**: Fit集合のみを対象にLeave-One-Out cross-validationで較正曲線を学習し（`p=0.2→0.181`, `0.4→0.322`, `0.6→0.492`, `0.8→0.686`, `1.0→0.874`、holdoutの較正曲線とほぼ同形——過信の再現性を確認）、isotonic回帰（PAV）でmonotone写像を作成。holdoutには一度も参照させず、学習済みmappingを凍結して**一度だけ**真のholdoutへ適用した。
+
+**結果**:
+```
+RAW（較正前）:        formula_accuracy = 58.4%  FAIL
+CALIBRATED（較正後）:  formula_accuracy = 55.9%  FAIL（改善せず、悪化）
+```
+Brier score自体は改善した（0.186→0.180、個々の`p(s)`単体としての精度は向上）が、Value Formulaのaccuracyは悪化した。特にmulti-species body（元々62.8%と相対的に良好だったサブセット）が58.0%へ低下。原因は、較正が全確率帯を一律に下方修正するため、複数speciesの合計値を扱うmulti-species bodyでは縮小が積み重なり系統的な過小予測を招くため——**「個々の確率としての較正精度」と「複数確率の和として評価されるValue Formula精度」は別物であり、単純なglobal calibrationでは解決しない**、という実データによる知見。
+
+**Probability Calibration Evaluation: NOT ADOPTED**。この較正mappingはValue Formulaに採用しない。60% gateはFAILのまま。
+
+### 5.7 次段階
+
+観測不足仮説（否定）・確率較正（不採用）の2つの原因仮説を実データで潰したうえで、次はk-NNのdistance calculation・neighbor selection・feature contributionの詳細監査（各特徴量が距離にどれだけ寄与しているか）に進む。モデル変更（k変更、特徴量重み変更、閾値処理等）はまだ行わない。
 
 ## 6. Acceptance Tests
 
