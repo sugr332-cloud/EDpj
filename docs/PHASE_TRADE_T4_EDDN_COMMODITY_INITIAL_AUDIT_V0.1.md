@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.1
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。§16でstation-level単指標の誤り（選択バイアス）を訂正。T4-E: Two-Level Classification実装（§17でtie処理の問題発見、§18でFeature B v2として解決・実データ検証済み）。production thresholdは意図的に未確定のまま
+**Version:** 1.2
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。T4-E: Feature B v2実装（§17-18）。7日間のMulti-day Stability Validation実施（§19）——Feature Aの分布は安定、ただし「持続性が高いほど破損の確度が高い」という仮説は実データで否定され、持続的異常はむしろ実在する局所経済状況（採掘拠点等）である可能性が高いと判明。value_ratioの絶対額下限が未実装という新課題も発見。production thresholdは引き続き未確定
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -723,3 +723,79 @@ gallite（§17.3の143件タイ実例、実データで直接確認）:
 ### 18.3 現時点の判断
 
 Feature B v2は§17.3で発見した問題を実データで解決したことを確認した。**production thresholdはまだ確定しない**（意図的、方針は§14/§16.5/§17.4から変更なし）。次段階は、282〜312件のCOMMODITY_ANOMALY候補の中身をさらにサンプリング検証すること、複数日での安定性確認、またはこの時点で十分な検証が積み上がったと判断してThreshold Calibrationへ進めることのいずれか。
+
+## 19. Multi-day Stability Validation
+
+### 19.1 実施内容
+
+T4-Bと同じ14日間ウィンドウから7日（2026-08-23, 25, 27, 29, 31, 09-02, 09-04）を抽出し、Feature A/B v2の全パイプラインを日ごとに再計算した。3種類の閾値セット（A: station>=1.3/pct>=0.99/tie<=0.05/ratio>=1.3、B: tie<=0.01に厳格化、C: station>=1.2/pct>=0.995/tie<=0.01/ratio>=1.2）を並行して評価した。
+
+### 19.2 Feature A（station_median_ratio）の分布は極めて安定
+
+```text
+日付         n_station  P50      P90      P99      max
+2026-08-23   6,780      0.997    1.074    1.112    4.265
+2026-08-25   6,008      0.997    1.071    1.108    3.767
+2026-08-27   5,824      0.998    1.070    1.108    1.607
+2026-08-29   6,744      0.997    1.071    1.112    1.607
+2026-08-31   7,711      0.998    1.065    1.096    1.637
+2026-09-02   5,289      0.996    1.071    1.109    1.637
+2026-09-04   5,844      0.996    1.077    1.110    1.697
+```
+
+P50/P90/P99は7日間を通じてほぼ完全に一定（P50は0.996〜0.998、P90は1.065〜1.077、P99は1.096〜1.112）。**Feature Aの母集団分布は日次で安定しており、健全な特徴量であることが多日データでも裏付けられた。**
+
+### 19.3 COMMODITY_ANOMALY件数の日次変動（率で見ると閾値Cが最も安定）
+
+```text
+閾値A（tie<=5%）: 269〜423件（母集団に対する比率で見ると4.62%〜7.05%）
+閾値B（tie<=1%）: 258〜423件
+閾値C（station>=1.2, pct>=0.995, tie<=1%, ratio>=1.2）: 232〜338件（比率で3.86%〜4.94%、最も狭い変動幅）
+```
+
+閾値Cが最も日次で安定した比率（約4〜5%）を示した。ただし7日間という限られたサンプルであり、これを「正常な異常率」として確定するのはまだ早い。
+
+### 19.4 最重要の発見: 「持続性」の解釈が当初の想定と逆だった
+
+同一station（`market_id`で追跡）が複数日にわたってCOMMODITY_ANOMALY判定される頻度（閾値B使用）:
+
+```text
+7日間で少なくとも1回検出: 1,490 station
+  うち2日以上で検出: 458件（30.7%）
+  うち7日全てで検出: 10件（0.67%）
+持続性の分布: 1日のみ=1,032, 2日=246, 3日=114, 4日=57, 5日=19, 6日=12, 7日=10
+```
+
+**「複数日にわたって持続的に検出される station は、より確度の高い破損候補である」という当初の仮説を検証するため、7日全てで検出された10件を個別に調査した。しかし結果は逆だった。**
+
+10件全ての「原因commodity」を特定した結果:
+
+```text
+hydrogenfuel（2件）: global_median=80CR → 実価格は約160CR（絶対額としては僅少、比率だけが2倍）
+copper（3件）:       global_median=782CR → 実価格は約1,700〜1,750CR
+osmium（2件）:       global_median=47,213CR → 実価格は約235,000CR
+platinum（1件）:     global_median=59,303CR → 実価格は約281,000CR
+painite（1件）:      global_median=55,036CR → 実価格は約200,000CR
+superconductors（1件）: global_median=7,407CR → 実価格は約10,450CR
+```
+
+osmium/platinum/painiteが原因の4 stationの実際のcommodity listing（§19.5参照）を見ると、いずれも`musgravite`・`benitoite`・`serendibite`・`grandidierite`のような超高額な希少鉱物を大量に扱っており、**実在する希少鉱物の採掘拠点（mining hotspot）における正当な高額買取価格である可能性が高い**——Elite Dangerousには実際にこの種の局所的・持続的な高価格市場（Paesia等の有名な採掘スポット、Thargoid War Zone、Rescue Ship等）が実在する。hydrogenfuel/copperが原因の5 stationは、**そもそも絶対額が小さいcommodityで、比率ベースの閾値（value_ratio）が過敏に反応しているだけ**——経済的にはほぼ無意味な変動である。
+
+**いずれのケースも、Heck Silo/gold型の「無関係な単一commodityが理由不明で突出する」というパターンとは異なる。** むしろ持続的な異常は「実在する安定した局所経済状況」を反映している可能性が高く、**真のデータ破損（Heck Siloのような孤立事例）はむしろ一過性（一日だけ検出される）である可能性の方が高い**、という実データからの示唆が得られた。これは「持続性が高いほど破損の確度が高い」という直感的仮説と正反対の結果であり、正直に記録する。
+
+### 19.5 追加で判明した問題: 低価格commodityでのvalue_ratio閾値の過敏性
+
+`hydrogenfuel`（母集団中央値80CR）や`copper`（782CR）のような低価格commodityでは、絶対額でわずか80〜1,000CR程度の差でも`value_ratio>=1.3`という比率条件を満たしてしまう。**value_ratioは比率ベースのみで絶対額を考慮していないため、経済的に無意味な変動を拾ってしまう。** 今後Feature Bをさらに改良する場合、絶対額の下限（例: 母集団中央値との差が一定CR以上）も条件に加えることが望ましい——これも閾値確定の前に検討すべき設計課題として記録する。
+
+### 19.6 結論
+
+```text
+Feature A: 7日間で分布が安定 → 健全
+Feature B v2: COMMODITY_ANOMALY比率は閾値Cで比較的安定（3.86〜4.94%）
+持続性: 「持続的＝破損の確度が高い」という仮説は否定された。
+        持続的異常は実在する局所経済状況（採掘拠点等）である可能性が高く、
+        一過性の異常（Heck Silo型）の方が真の破損候補として有力
+新たな課題: value_ratioの絶対額下限が未実装（低価格commodityでの過敏な反応）
+```
+
+**production thresholdは引き続き未確定。** 次段階は、(a) value_ratioの絶対額下限を追加する設計、(b) 一過性（1〜2日のみ検出）の異常候補を個別に裏取りする、のいずれかを検討する必要がある。
