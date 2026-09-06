@@ -69,6 +69,37 @@ def upsert_if_newer(
     session.expire_all()
 
 
+def upsert_if_older(
+    session: Session,
+    model,
+    rows: list[dict],
+    index_elements: list[str],
+    timestamp_column: str,
+) -> None:
+    """Insert rows, and on a conflict with `index_elements`, overwrite the
+    existing row only if the incoming row's `timestamp_column` is strictly
+    OLDER -- the mirror image of upsert_if_newer(). Used for
+    BioObservation (app/db/models/eddn.py): a body's species composition
+    is a static fact, so duplicate archive reports of the same
+    (system_address, body_id, species) should keep the EARLIEST
+    observed_at, not the latest -- a later duplicate must never make a
+    body look newer to the population than it actually was (needed for
+    the chronological fit/holdout split,
+    docs/PHASE_BIO_SPECIES_PREDICTION_BACKTEST_DESIGN_BASELINE_V0.1.md §2.2/§4.1)."""
+    if not rows:
+        return
+    dialect_insert = _dialect_insert(session)
+    stmt = dialect_insert(model).values(rows)
+    update_columns = {col for col in rows[0] if col not in index_elements}
+    stmt = stmt.on_conflict_do_update(
+        index_elements=index_elements,
+        set_={col: getattr(stmt.excluded, col) for col in update_columns},
+        where=(getattr(stmt.excluded, timestamp_column) < getattr(model, timestamp_column)),
+    )
+    session.execute(stmt)
+    session.expire_all()  # see upsert_if_newer's comment on why this is needed
+
+
 def upsert_preserve_columns(
     session: Session,
     model,

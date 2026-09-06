@@ -47,15 +47,20 @@ def _archive_url(date: dt.date) -> str:
     return f"{ARCHIVE_BASE_URL}/{date:%Y-%m}/Commodity-{date:%Y-%m-%d}.jsonl.bz2"
 
 
-def iter_commodity_day(date: dt.date, client: StreamingHttpClient) -> Iterator[dict[str, Any]]:
-    """Streams one day's archive, yielding each parsed EDDN envelope
-    ({"$schemaRef","header","message"}). Never buffers the whole
+def _scanorganic_archive_url(date: dt.date) -> str:
+    return f"{ARCHIVE_BASE_URL}/{date:%Y-%m}/Journal.ScanOrganic-{date:%Y-%m-%d}.jsonl.bz2"
+
+
+def _iter_archive_day(url: str, client: StreamingHttpClient) -> Iterator[dict[str, Any]]:
+    """Streams one day's archive file at `url`, yielding each parsed EDDN
+    envelope ({"$schemaRef","header","message"}). Never buffers the whole
     (decompressed) file in memory -- decompresses and splits into lines
     incrementally as bytes arrive. A day that doesn't exist in the
     archive yet (e.g. today, or a date before the archive's own start)
     yields nothing rather than raising -- that's "no data available",
-    not an error."""
-    url = _archive_url(date)
+    not an error. Shared by iter_commodity_day() and
+    iter_scanorganic_day() -- only the URL differs between schemas
+    (Phase Bio Species Prediction Backtest design doc §2.3)."""
     with client.stream("GET", url) as response:
         if response.status_code == 404:
             return
@@ -80,6 +85,18 @@ def iter_commodity_day(date: dt.date, client: StreamingHttpClient) -> Iterator[d
                 yield json.loads(remainder)
             except ValueError:
                 pass
+
+
+def iter_commodity_day(date: dt.date, client: StreamingHttpClient) -> Iterator[dict[str, Any]]:
+    return _iter_archive_day(_archive_url(date), client)
+
+
+def iter_scanorganic_day(date: dt.date, client: StreamingHttpClient) -> Iterator[dict[str, Any]]:
+    """Journal.ScanOrganic-YYYY-MM-DD.jsonl.bz2 -- confirmed present on the
+    same real archive (docs/BIO_SCANORGANIC_DATA_AVAILABILITY_
+    INVESTIGATION_V0.1.md §1), a whole-population feed with no per-target
+    filtering (every commander's real ScanOrganic reports for that day)."""
+    return _iter_archive_day(_scanorganic_archive_url(date), client)
 
 
 def fetch_commodity_observations(

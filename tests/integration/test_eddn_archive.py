@@ -4,7 +4,7 @@ import bz2
 import datetime as dt
 import json
 
-from app.collectors.eddn_archive import fetch_commodity_observations, iter_commodity_day
+from app.collectors.eddn_archive import fetch_commodity_observations, iter_commodity_day, iter_scanorganic_day
 
 
 class _FakeResponse:
@@ -134,3 +134,29 @@ class TestFetchCommodityObservations:
 
         result = fetch_commodity_observations(date, station_id=100, commodity_name="platinum", client=client)
         assert result == []
+
+
+class TestIterScanorganicDay:
+    def test_streams_scanorganic_envelopes(self):
+        date = dt.date(2026, 8, 22)
+        url = f"https://edgalaxydata.space/EDDN/{date:%Y-%m}/Journal.ScanOrganic-{date:%Y-%m-%d}.jsonl.bz2"
+        envelope = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/scanorganic/1",
+            "header": {"uploaderID": "test-uploader"},
+            "message": {
+                "BodyID": 5, "SystemAddress": 123, "StarSystem": "Test System",
+                "StarPos": [1.0, 2.0, 3.0], "Genus": "$Codex_Ent_Bacterial_Genus_Name;",
+                "Species": "$Codex_Ent_Bacterial_01_Name;", "ScanType": "Log",
+                "timestamp": "2026-08-22T00:03:56Z",
+            },
+        }
+        client = FakeStreamingHttpClient({url: _compress_day([envelope])})
+
+        results = list(iter_scanorganic_day(date, client))
+
+        assert len(results) == 1
+        assert results[0]["message"]["Species"] == "$Codex_Ent_Bacterial_01_Name;"
+
+    def test_missing_day_yields_nothing(self):
+        client = FakeStreamingHttpClient({})
+        assert list(iter_scanorganic_day(dt.date(2026, 8, 22), client)) == []

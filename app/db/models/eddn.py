@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -67,5 +67,57 @@ class BodyBioSignal(Base):
     first_observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class BioObservation(Base):
+    """External, whole-population EDDN `scanorganic/1` archive observations
+    -- Phase Bio Species Prediction Backtest
+    (docs/PHASE_BIO_SPECIES_PREDICTION_BACKTEST_DESIGN_BASELINE_V0.1.md §2).
+    Never populated from this player's own Journal
+    (docs/BIO_EXTERNAL_DATA_VALIDATION_SPEC_V0.1.md §2.1 -- personal Journal
+    is for personal calibration/E2E only, never population statistics).
+
+    Unique on (system_address, body_id, species): a body's species
+    composition is a static game fact, so repeated archive reports of the
+    same (body, species) collapse to one row -- see `upsert_if_older` in
+    app/db/upsert.py, which this table relies on to keep the EARLIEST
+    observed_at across duplicate reports (needed for the chronological
+    fit/holdout split, spec §4.1 -- a later duplicate report must never
+    make a body look newer to the population than it actually was)."""
+
+    __tablename__ = "bio_observations"
+    __table_args__ = (
+        UniqueConstraint("system_address", "body_id", "species", name="uq_bio_observation"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    system_address: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    body_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    star_system: Mapped[str] = mapped_column(String, nullable=False)
+    genus: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    species: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    variant: Mapped[str | None] = mapped_column(String, nullable=True)
+    star_pos_x: Mapped[float] = mapped_column(Float, nullable=False)
+    star_pos_y: Mapped[float] = mapped_column(Float, nullable=False)
+    star_pos_z: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="scanorganic_archive")
+
+
+class BioObservationFetchLog(Base):
+    """Records that a given archive date's Journal.ScanOrganic file has
+    already been ingested -- date-only key (unlike
+    MarketHistoricalFetchLog's (station,commodity,date), since
+    scanorganic/1 is a galaxy-wide population feed with no per-target
+    scoping to track)."""
+
+    __tablename__ = "bio_observation_fetch_log"
+    __table_args__ = (UniqueConstraint("date", name="uq_bio_observation_fetch_log_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    fetched_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.timezone.utc)
     )
