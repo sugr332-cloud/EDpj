@@ -98,40 +98,75 @@ def compute_station_median_ratio(
     }
 
 
-def compute_commodity_percentiles(
+@dataclass(frozen=True)
+class CommodityPriceStats:
+    """Feature B v2 (design doc §17.4, "T4-E Feature B v2") -- kept as
+    separate components rather than collapsed into one score, per
+    review direction. §17.3's real finding: a naive rank-only percentile
+    cannot distinguish "143 stations independently reached the same
+    natural price ceiling for a cheap, low-variance commodity" (gallite)
+    from "exactly one station stands alone far above everyone else"
+    (gold/Heck Silo) -- both score percentile=1.0. The tie-count/share
+    fields exist specifically to make that distinction possible without
+    fixing a threshold yet."""
+
+    percentile: float  # rank within this commodity's own population (unchanged v1 definition)
+    value_ratio: float  # station_price / commodity_global_median
+    max_tie_count: int  # how many stations (for this commodity) share the population's max price
+    max_tie_share: float  # max_tie_count / observation_count
+    observation_count: int  # population size for this commodity
+
+
+def compute_commodity_stats(
     deduped: dict[tuple[int, str], SellObservation],
-) -> dict[tuple[int, str], float]:
-    """Feature B (design doc §16, "T4-E"): for EVERY (station, commodity)
-    pair, the percentile rank of that station's price within THAT
-    commodity's own population (not the station's basket median).
-    Complementary to compute_station_median_ratio -- §16.3's real
-    finding was that a station can be entirely unremarkable at the
-    station level (median ratio near 1.0) while one specific commodity
-    it sells is the single most extreme value in that commodity's whole
-    population (P100). Station-level aggregation cannot see this; only
-    a per-commodity check can."""
+    global_median: dict[str, float],
+) -> dict[tuple[int, str], CommodityPriceStats]:
+    """Feature B v2: for EVERY (station, commodity) pair, computes rank
+    (percentile), magnitude (value_ratio against the population median),
+    and how common the commodity's own maximum price is (tie count/
+    share) -- so a caller can tell "isolated genuine outlier" (gold: 1
+    station at the max, 0.02% share) apart from "common market ceiling"
+    (gallite: 143 stations, 2.98% share) without those two cases
+    collapsing into the same percentile=1.0 value (§17.3)."""
     prices_by_commodity: dict[str, list[int]] = defaultdict(list)
     for (_, commodity_name), obs in deduped.items():
         prices_by_commodity[commodity_name].append(obs.sell_price)
-    sorted_prices = {name: sorted(prices) for name, prices in prices_by_commodity.items()}
 
-    percentiles: dict[tuple[int, str], float] = {}
+    sorted_prices: dict[str, list[int]] = {}
+    max_price: dict[str, int] = {}
+    max_tie_count: dict[str, int] = {}
+    for name, prices in prices_by_commodity.items():
+        sorted_prices[name] = sorted(prices)
+        max_price[name] = sorted_prices[name][-1]
+        max_tie_count[name] = sum(1 for p in prices if p == max_price[name])
+
+    stats: dict[tuple[int, str], CommodityPriceStats] = {}
     for key, obs in deduped.items():
-        population = sorted_prices[obs.commodity_name]
+        commodity_name = obs.commodity_name
+        population = sorted_prices[commodity_name]
         n = len(population)
         if n == 0:
             continue
+        median = global_median.get(commodity_name)
+        if median is None or median <= 0:
+            continue
         below_or_equal = sum(1 for p in population if p <= obs.sell_price)
-        percentiles[key] = below_or_equal / n
-    return percentiles
+        stats[key] = CommodityPriceStats(
+            percentile=below_or_equal / n,
+            value_ratio=obs.sell_price / median,
+            max_tie_count=max_tie_count[commodity_name],
+            max_tie_share=max_tie_count[commodity_name] / n,
+            observation_count=n,
+        )
+    return stats
 
 
 @dataclass(frozen=True)
 class PriceAnomalyAssessment:
     station_id: int
     station_median_ratio: float | None  # Feature A -- None if below min_reference_commodities
-    worst_commodity_percentile: float | None  # Feature B -- max percentile among this station's own commodities
     worst_commodity_name: str | None
+    worst_commodity_stats: CommodityPriceStats | None  # Feature B v2 -- full component breakdown
     n_reference_commodities: int
 
 
@@ -139,25 +174,26 @@ def assess_station(
     station_id: int,
     deduped: dict[tuple[int, str], SellObservation],
     station_median_ratio: dict[int, float],
-    commodity_percentiles: dict[tuple[int, str], float],
+    commodity_stats: dict[tuple[int, str], CommodityPriceStats],
 ) -> PriceAnomalyAssessment:
     """Assembles both features for one station. Does NOT classify --
     per the explicit design decision (§16.5) not to fix thresholds
-    before more examples are gathered. Callers apply their own
-    threshold pair via `classify()` below, kept as parameters rather
-    than module constants."""
+    before more examples are gathered. "Worst" commodity is still
+    selected by percentile (highest rank) -- the tie-count/value-ratio
+    fields on that selected commodity are what let a caller judge
+    whether the high rank is actually suspicious."""
     station_commodities = [c for (sid, c) in deduped if sid == station_id]
-    worst_name, worst_pct = None, None
+    worst_name, worst_stats = None, None
     for c in station_commodities:
-        pct = commodity_percentiles.get((station_id, c))
-        if pct is not None and (worst_pct is None or pct > worst_pct):
-            worst_pct, worst_name = pct, c
+        stats = commodity_stats.get((station_id, c))
+        if stats is not None and (worst_stats is None or stats.percentile > worst_stats.percentile):
+            worst_stats, worst_name = stats, c
 
     return PriceAnomalyAssessment(
         station_id=station_id,
         station_median_ratio=station_median_ratio.get(station_id),
-        worst_commodity_percentile=worst_pct,
         worst_commodity_name=worst_name,
+        worst_commodity_stats=worst_stats,
         n_reference_commodities=len(station_commodities),
     )
 
@@ -166,17 +202,36 @@ def classify(
     assessment: PriceAnomalyAssessment,
     station_ratio_threshold: float,
     commodity_percentile_threshold: float,
+    commodity_max_tie_share_threshold: float,
+    commodity_value_ratio_threshold: float,
 ) -> str:
-    """Two-axis classification (design doc §16, "T4-E"). Thresholds are
-    caller-supplied, never hardcoded here -- production values remain
-    UNRESOLVED per §14/§16.5 pending more calibration examples."""
+    """Two-axis classification (design doc §16-17, "T4-E"). Thresholds
+    are caller-supplied, never hardcoded here -- production values
+    remain UNRESOLVED per §14/§16.5/§17.4 pending more calibration
+    examples.
+
+    Feature B (commodity-level) is now itself a conjunction, per
+    §17.3/§17.4: a high percentile alone is NOT sufficient -- it must
+    ALSO be a rare value (max_tie_share below threshold, i.e. few other
+    stations share it) AND a genuinely large magnitude (value_ratio
+    above threshold) before being called anomalous. This is what
+    correctly separates gold/Heck Silo (percentile=1.0, tie_share=0.02%,
+    value_ratio=1.42 -- all three conditions met) from gallite's 143-way
+    tie (percentile=1.0, tie_share=2.98%, likely a common ceiling) even
+    though both score percentile=1.0."""
     station_anomalous = (
         assessment.station_median_ratio is not None and assessment.station_median_ratio >= station_ratio_threshold
     )
-    commodity_anomalous = (
-        assessment.worst_commodity_percentile is not None
-        and assessment.worst_commodity_percentile >= commodity_percentile_threshold
-    )
+
+    commodity_anomalous = False
+    stats = assessment.worst_commodity_stats
+    if stats is not None:
+        commodity_anomalous = (
+            stats.percentile >= commodity_percentile_threshold
+            and stats.max_tie_share <= commodity_max_tie_share_threshold
+            and stats.value_ratio >= commodity_value_ratio_threshold
+        )
+
     if station_anomalous and commodity_anomalous:
         return "STRONG_ANOMALY"
     if station_anomalous:

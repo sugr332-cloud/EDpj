@@ -1,7 +1,7 @@
 # Phase 2-6F-T4 — EDDN Commodity/3 Audit（T4-A/B/C/D + Distance/Jump + Calibration + T4-E）
 
-**Version:** 1.0
-**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。§16でstation-level単指標の誤り（選択バイアス）を訂正。T4-E: Two-Level Classification実装（§17、Feature A健全、Feature Bはtie処理の改良が必要と判明）。production thresholdは意図的に未確定のまま
+**Version:** 1.1
+**Status:** T4-A/B/C/D・Distance/Jump Integration完了（§15）。§16でstation-level単指標の誤り（選択バイアス）を訂正。T4-E: Two-Level Classification実装（§17でtie処理の問題発見、§18でFeature B v2として解決・実データ検証済み）。production thresholdは意図的に未確定のまま
 **Date:** 2026-09-06
 **Depends on:** `docs/PHASE_TRADE_EXTERNAL_MARKET_SOURCE_FEASIBILITY_V0.1.md`（T4の要求項目・deliverable様式の一次情報源）, `docs/DECISION_MARKET_REEVALUATION_V0.2.md`
 
@@ -680,3 +680,46 @@ T4-E現状:
   2軸classify()                            → 実装済み、閾値は未確定
   production threshold                     → 未確定（意図的）
 ```
+
+## 18. Feature B v2: 構成要素を分離した価格妥当性指標
+
+### 18.1 実装
+
+`compute_commodity_percentiles`を廃止し、`compute_commodity_stats`に置き換え（このモジュールは他コードから未参照のため、破壊的変更を許容）。`CommodityPriceStats`データクラスとして以下を**1つのスコアに潰さず個別に保持**:
+
+```text
+percentile        : そのcommodity自身の母集団内での順位（v1と同じ定義）
+value_ratio       : station価格 / commodity_global_median（倍率そのもの）
+max_tie_count     : そのcommodityの最大価格を共有する独立station数
+max_tie_share     : max_tie_count / observation_count
+observation_count : そのcommodityの母集団サイズ
+```
+
+`classify()`のcommodity側判定を、percentile単独ではなく**3条件の論理積**に変更: `percentile>=閾値 AND max_tie_share<=閾値 AND value_ratio>=閾値`（すべて呼び出し側パラメータ、モジュール内に固定値なし）。8テスト追加（うち1件は§17.3のgallite 143件タイ実例を模した**固定回帰テスト**——将来の特徴量変更が「自然な価格上限」を再び異常扱いする退行を検出する）。計17テスト、全体625テスト。
+
+### 18.2 実データでの検証（2026-09-05）
+
+```text
+Heck Silo: station_ratio=1.073  worst=gold  percentile=1.0000  tie_share=0.0002（0.02%）  value_ratio=1.422
+  → classify() = COMMODITY_ANOMALY（3条件すべて満たす）
+
+gallite（§17.3の143件タイ実例、実データで直接確認）:
+  percentile=1.0000  tie_share=0.0298（2.98%、閾値1%を超過）  value_ratio=1.030（閾値1.3を大きく下回る）
+  → classify() = NORMAL（tie_shareとvalue_ratioの両方が独立に除外条件を満たしており、二重に安全）
+```
+
+**gallite側は、tie_share・value_ratioのどちらか片方だけでも誤検出を防げていた**——2つの追加指標が独立に効いていることが確認できた。
+
+閾値候補3パターンで試算（n=5,769）:
+
+```text
+(station>=1.3, pct>=0.99, tie_share<=0.05, value_ratio>=1.3): COMMODITY_ANOMALY 303件（5.25%）
+(station>=1.3, pct>=0.99, tie_share<=0.01, value_ratio>=1.3): COMMODITY_ANOMALY 282件（4.89%）
+(station>=1.2, pct>=0.995, tie_share<=0.01, value_ratio>=1.2): COMMODITY_ANOMALY 312件（5.41%）
+```
+
+いずれの組み合わせでもHeck Siloは一貫してCOMMODITY_ANOMALYに分類され、gallite型の共有天井は一貫してNORMALに分類された——Feature B v2は少なくともこの2つの既知パターンに対して閾値の選び方に対して頑健。ただし該当282〜312件の内訳は未精査（`polymers`で価格比14.9倍のような、個別に裏取りが必要なケースも含まれる）。
+
+### 18.3 現時点の判断
+
+Feature B v2は§17.3で発見した問題を実データで解決したことを確認した。**production thresholdはまだ確定しない**（意図的、方針は§14/§16.5/§17.4から変更なし）。次段階は、282〜312件のCOMMODITY_ANOMALY候補の中身をさらにサンプリング検証すること、複数日での安定性確認、またはこの時点で十分な検証が積み上がったと判断してThreshold Calibrationへ進めることのいずれか。
